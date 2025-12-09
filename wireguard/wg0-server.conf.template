@@ -1,0 +1,24 @@
+[Interface]
+# Приватный ключ сервера (будет сгенерирован)
+PrivateKey = SERVER_PRIVATE_KEY
+
+# IP адрес сервера в VPN сети
+Address = 10.0.0.1/24
+
+# Порт для входящих подключений
+ListenPort = 51820
+
+# Forwarding (если нужен доступ к другим сетям через VPN)
+# PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+# PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+# Публичный ключ клиента (Keenetic роутер)
+PublicKey = CLIENT_PUBLIC_KEY
+
+# IP адрес клиента в VPN сети
+AllowedIPs = 10.0.0.2/32, 10.0.0.100/32
+
+# Keepalive для поддержания соединения через NAT
+PersistentKeepalive = 25
+

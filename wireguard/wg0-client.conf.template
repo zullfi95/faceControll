@@ -1,0 +1,24 @@
+[Interface]
+# Приватный ключ клиента (будет сгенерирован)
+PrivateKey = CLIENT_PRIVATE_KEY
+
+# IP адрес клиента в VPN сети
+Address = 10.0.0.2/24
+
+# DNS (опционально, можно указать DNS сервер)
+# DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+# Публичный ключ сервера
+PublicKey = SERVER_PUBLIC_KEY
+
+# Endpoint - IP адрес и порт сервера Hetzner
+Endpoint = 46.62.223.55:51820
+
+# Какие сети доступны через VPN
+# 10.0.0.0/24 - вся VPN сеть
+AllowedIPs = 10.0.0.0/24
+
+# Keepalive для поддержания соединения
+PersistentKeepalive = 25
+

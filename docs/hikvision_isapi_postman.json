@@ -1,0 +1,86 @@
+{
+    "info": {
+        "name": "Hikvision ISAPI Full Collection",
+        "_postman_id": "hikvision-isapi-collection-001",
+        "description": "Full ISAPI collection for Hikvision Face Recognition Terminals (Value Series / MinMoe / Pro).",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "System - Device Info",
+            "request": {
+                "method": "GET",
+                "url": "{{base_url}}/ISAPI/System/deviceInfo",
+                "description": "Get device information."
+            }
+        },
+        {
+            "name": "System - Capabilities",
+            "request": {
+                "method": "GET",
+                "url": "{{base_url}}/ISAPI/System/Capabilities",
+                "description": "Get supported capabilities."
+            }
+        },
+        {
+            "name": "System - Reboot",
+            "request": {
+                "method": "PUT",
+                "url": "{{base_url}}/ISAPI/System/reboot",
+                "description": "Reboot the device."
+            }
+        },
+        {
+            "name": "AccessControl - Users - Get All",
+            "request": {
+                "method": "GET",
+                "url": "{{base_url}}/ISAPI/AccessControl/UserInfo?format=json",
+                "description": "List all users."
+            }
+        },
+        {
+            "name": "AccessControl - Users - Add User",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\"UserInfo\": {\"employeeNo\": \"1\", \"name\": \"Test User\", \"userType\": \"normal\"}}"
+                },
+                "url": "{{base_url}}/ISAPI/AccessControl/UserInfo",
+                "description": "Add a new user."
+            }
+        },
+        {
+            "name": "FDLib - Upload Face",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\"FaceDataRecord\": {\"faceLibType\": \"blackFD\", \"FDID\": \"1\", \"FPID\": \"1\"}}"
+                },
+                "url": "{{base_url}}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json",
+                "description": "Upload face image metadata."
+            }
+        },
+        {
+            "name": "AccessControl - Open Door",
+            "request": {
+                "method": "PUT",
+                "url": "{{base_url}}/ISAPI/AccessControl/RemoteControl/door/1",
+                "description": "Remotely unlock door."
+            }
+        }
+    ]
+}
