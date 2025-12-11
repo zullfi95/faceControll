@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import UsersPage from './pages/UsersPage';
 import ReportsPage from './pages/ReportsPage';
 import DeviceSettingsPage from './pages/DeviceSettingsPage';
+import EventsPage from './pages/EventsPage';
 
 function App() {
   return (
@@ -19,6 +20,9 @@ function App() {
                   <Link to="/" className="border-indigo-500 text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                     Сотрудники
                   </Link>
+                  <Link to="/events" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+                    События
+                  </Link>
                   <Link to="/reports" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                     Отчеты
                   </Link>
@@ -34,6 +38,7 @@ function App() {
         <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
           <Routes>
             <Route path="/" element={<UsersPage />} />
+            <Route path="/events" element={<EventsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings" element={<DeviceSettingsPage />} />
           </Routes>

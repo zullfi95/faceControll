@@ -36,7 +36,18 @@ def decrypt_password(encrypted_password: str) -> str:
         decrypted = f.decrypt(encrypted_password.encode())
         return decrypted.decode()
     except Exception as e:
-        raise ValueError(f"Failed to decrypt password: {e}")
+        error_msg = str(e)
+        error_type = type(e).__name__
+        
+        # Более информативные сообщения об ошибках
+        if "InvalidToken" in error_type or "signature" in error_msg.lower() or "Invalid" in error_type:
+            raise ValueError(
+                "Не удалось расшифровать пароль устройства. Пароль был зашифрован другим ключом шифрования. "
+                "Решение: Перейдите в 'Настройки' → 'Устройства' и обновите пароль устройства, "
+                "или удалите и создайте устройство заново с правильным паролем."
+            )
+        else:
+            raise ValueError(f"Ошибка расшифровки пароля: {error_msg}")
 
 
 def generate_encryption_key() -> str:

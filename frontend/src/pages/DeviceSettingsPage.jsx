@@ -122,6 +122,15 @@ const DeviceSettingsPage = () => {
     setIsEditingDevice(true);
   };
 
+  // Безопасные объекты для поддерживаемых функций
+  const features = supportedFeatures?.features || {};
+  const system = features.system || {};
+  const network = features.network || {};
+  const security = features.security || {};
+  const access = features.access_control || {};
+  const videoAudio = features.video_audio || {};
+  const other = features.other || {};
+
   if (isLoading) return <div className="p-8">Загрузка...</div>;
 
   return (
@@ -135,9 +144,9 @@ const DeviceSettingsPage = () => {
 
       {/* Текущее устройство */}
       {devices && devices.length > 0 ? (
-        <div className="bg-white shadow sm:rounded-lg mb-6">
+        <div className="bg-white shadow-card sm:rounded-lg mb-6 border border-gray-100">
           <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+            <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
               {devices[0].name}
             </h3>
             
@@ -175,14 +184,14 @@ const DeviceSettingsPage = () => {
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => checkStatus()}
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700"
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
                 >
                   Проверить соединение
                 </button>
                 
                 <button
                   onClick={startEditing}
-                  className="bg-yellow-600 text-white px-4 py-2 rounded-md hover:bg-yellow-700"
+                  className="bg-yellow-600 text-white px-4 py-2 rounded-md hover:bg-yellow-700 shadow-medium transition-shadow duration-200 font-medium"
                 >
                   Редактировать
                 </button>
@@ -191,7 +200,7 @@ const DeviceSettingsPage = () => {
                   <button
                     onClick={handleReboot}
                     disabled={rebootMutation.isPending}
-                    className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-medium transition-shadow duration-200 font-medium"
                   >
                     {rebootMutation.isPending ? 'Перезагрузка...' : 'Перезагрузить устройство'}
                   </button>
@@ -249,41 +258,42 @@ const DeviceSettingsPage = () => {
                   <p className="text-sm text-gray-500">Загрузка...</p>
                 ) : supportedFeatures?.features ? (
                   <div className="space-y-4">
+
                     {/* Системные функции */}
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-2">Система</h4>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        {supportedFeatures.features.system.reboot && (
+                        {system.reboot && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Перезагрузка</span>
                           </div>
                         )}
-                        {supportedFeatures.features.system.factory_reset && (
+                        {system.factory_reset && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Сброс настроек</span>
                           </div>
                         )}
-                        {supportedFeatures.features.system.firmware_update && (
+                        {system.firmware_update && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Обновление прошивки</span>
                           </div>
                         )}
-                        {supportedFeatures.features.system.snapshot && (
+                        {system.snapshot && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Снимок экрана</span>
                           </div>
                         )}
-                        {supportedFeatures.features.system.preview && (
+                        {system.preview && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Предпросмотр</span>
                           </div>
                         )}
-                        {supportedFeatures.features.system.configuration_import && (
+                        {system.configuration_import && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Импорт конфигурации</span>
@@ -296,43 +306,43 @@ const DeviceSettingsPage = () => {
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-2">Сеть</h4>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        {supportedFeatures.features.network.wifi && (
+                        {network.wifi && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Wi-Fi</span>
                           </div>
                         )}
-                        {supportedFeatures.features.network.https && (
+                        {network.https && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>HTTPS</span>
                           </div>
                         )}
-                        {supportedFeatures.features.network.ssh && (
+                        {network.ssh && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>SSH</span>
                           </div>
                         )}
-                        {supportedFeatures.features.network.websocket && (
+                        {network.websocket && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>WebSocket</span>
                           </div>
                         )}
-                        {supportedFeatures.features.network.ezviz && (
+                        {network.ezviz && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>EZVIZ</span>
                           </div>
                         )}
-                        {!supportedFeatures.features.network.ddns && (
+                        {network.ddns === false && (
                           <div className="flex items-center text-sm">
                             <span className="text-red-600 mr-2">✗</span>
                             <span className="text-gray-500">DDNS</span>
                           </div>
                         )}
-                        {!supportedFeatures.features.network.ftp && (
+                        {network.ftp === false && (
                           <div className="flex items-center text-sm">
                             <span className="text-red-600 mr-2">✗</span>
                             <span className="text-gray-500">FTP</span>
@@ -345,31 +355,31 @@ const DeviceSettingsPage = () => {
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-2">Безопасность</h4>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        {supportedFeatures.features.security.user_check && (
+                        {security.user_check && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Проверка пользователей</span>
                           </div>
                         )}
-                        {supportedFeatures.features.security.config_import && (
+                        {security.config_import && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Импорт конфигурации</span>
                           </div>
                         )}
-                        {supportedFeatures.features.security.config_export && (
+                        {security.config_export && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Экспорт конфигурации</span>
                           </div>
                         )}
-                        {supportedFeatures.features.security.certificates && (
+                        {security.certificates && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Сертификаты</span>
                           </div>
                         )}
-                        {supportedFeatures.features.security.password_protection && (
+                        {security.password_protection && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Защита паролем</span>
@@ -379,7 +389,7 @@ const DeviceSettingsPage = () => {
                     </div>
 
                     {/* Контроль доступа */}
-                    {supportedFeatures.features.access_control.supported && (
+                    {access.supported && (
                       <div>
                         <h4 className="text-sm font-semibold text-gray-700 mb-2">Контроль доступа</h4>
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -387,13 +397,13 @@ const DeviceSettingsPage = () => {
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Access Control</span>
                           </div>
-                          {supportedFeatures.features.access_control.encryption && (
+                          {access.encryption && (
                             <div className="flex items-center text-sm">
                               <span className="text-green-600 mr-2">✓</span>
                               <span>Шифрование</span>
                             </div>
                           )}
-                          {supportedFeatures.features.access_control.acs_update && (
+                          {access.acs_update && (
                             <div className="flex items-center text-sm">
                               <span className="text-green-600 mr-2">✓</span>
                               <span>Обновление ACS</span>
@@ -407,10 +417,10 @@ const DeviceSettingsPage = () => {
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-2">Видео/Аудио</h4>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
-                        <div>Видео входов: {supportedFeatures.features.video_audio.video_inputs}</div>
-                        <div>Аудио входов: {supportedFeatures.features.video_audio.audio_inputs}</div>
-                        <div>Аудио выходов: {supportedFeatures.features.video_audio.audio_outputs}</div>
-                        <div>Голосовая связь: {supportedFeatures.features.video_audio.voice_talk} канал</div>
+                        <div>Видео входов: —</div>
+                        <div>Аудио входов: —</div>
+                        <div>Аудио выходов: —</div>
+                        <div>Голосовая связь: — канал</div>
                       </div>
                     </div>
 
@@ -418,25 +428,19 @@ const DeviceSettingsPage = () => {
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-2">Дополнительно</h4>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        {supportedFeatures.features.other.bluetooth && (
+                        {other.bluetooth && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Bluetooth</span>
                           </div>
                         )}
-                        {supportedFeatures.features.other.iot_channels > 0 && (
-                          <div className="flex items-center text-sm">
-                            <span className="text-green-600 mr-2">✓</span>
-                            <span>IOT каналов: {supportedFeatures.features.other.iot_channels}</span>
-                          </div>
-                        )}
-                        {supportedFeatures.features.other.manual_snapshot && (
+                        {other.manual_snapshot && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>Ручной снимок</span>
                           </div>
                         )}
-                        {supportedFeatures.features.other.user_manual_qr && (
+                        {other.user_manual_qr && (
                           <div className="flex items-center text-sm">
                             <span className="text-green-600 mr-2">✓</span>
                             <span>QR код пользователя</span>
@@ -462,9 +466,9 @@ const DeviceSettingsPage = () => {
 
       {/* Редактирование устройства */}
       {isEditingDevice && editingDeviceData && (
-        <div className="bg-white shadow sm:rounded-lg mb-6">
+        <div className="bg-white shadow-card sm:rounded-lg mb-6 border border-gray-100">
           <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+            <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
               Редактирование устройства
             </h3>
             <form onSubmit={handleUpdateSubmit}>
@@ -518,13 +522,13 @@ const DeviceSettingsPage = () => {
                     setIsEditingDevice(false);
                     setEditingDeviceData(null);
                   }}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
+                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
                 >
                   Отмена
                 </button>
                 <button
                   type="submit"
-                  className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
                 >
                   Обновить
                 </button>
@@ -538,16 +542,16 @@ const DeviceSettingsPage = () => {
       {!isAddingDevice && (!devices || devices.length === 0) && (
         <button
           onClick={() => setIsAddingDevice(true)}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700"
+          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
         >
           Добавить устройство
         </button>
       )}
 
       {isAddingDevice && (
-        <div className="bg-white shadow sm:rounded-lg">
+        <div className="bg-white shadow-card sm:rounded-lg border border-gray-100">
           <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+            <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
               Новое устройство
             </h3>
             <form onSubmit={handleSubmit}>
@@ -599,13 +603,13 @@ const DeviceSettingsPage = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddingDevice(false)}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
+                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
                 >
                   Отмена
                 </button>
                 <button
                   type="submit"
-                  className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
                 >
                   Сохранить
                 </button>

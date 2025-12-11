@@ -4,7 +4,8 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@db:5432/facerecog")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+# echo=False to reduce SQL noise in logs
+engine = create_async_engine(DATABASE_URL, echo=False)
 
 AsyncSessionLocal = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

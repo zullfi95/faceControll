@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, RootModel, Field, field_validator
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -21,6 +21,12 @@ class UserCreate(UserBase):
         if not v.replace('_', '').replace('-', '').isalnum():
             raise ValueError('hikvision_id can only contain letters, numbers, underscores, and hyphens')
         return v
+
+class UserUpdate(BaseModel):
+    hikvision_id: Optional[str] = None
+    full_name: Optional[str] = None
+    department: Optional[str] = None
+    is_active: Optional[bool] = None
 
 class UserResponse(UserBase):
     id: int
@@ -120,3 +126,24 @@ class EventResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# --- Reports Schemas ---
+class DailyReportEntry(BaseModel):
+    """Запись в дневном отчете посещаемости."""
+    user: str  # Имя пользователя
+    hikvision_id: str  # ID в системе Hikvision
+    entry_time: Optional[str] = None  # Время входа (ISO format)
+    exit_time: Optional[str] = None  # Время выхода (ISO format)
+    hours_worked: float  # Отработанные часы
+    status: str  # "Present", "Absent", "Present (no exit)" и т.д.
+
+class DailyReportResponse(RootModel):
+    """Ответ endpoint /reports/daily."""
+    root: List[DailyReportEntry]
+
+class EventSyncResponse(BaseModel):
+    """Ответ endpoint синхронизации событий."""
+    success: bool
+    message: str
+    stats: Dict[str, int]
+    period: Dict[str, str]

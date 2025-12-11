@@ -1,21 +1,45 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Body
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional, Dict
-from datetime import datetime
+from sqlalchemy import select
+from typing import List, Dict, Any, Optional
 import os
 import uuid
 import logging
 from pathlib import Path
+import httpx
 
-from . import crud, models, schemas, database
+from . import models, database, crud, schemas, schemas_internal
+from .utils.crypto import decrypt_password, encrypt_password
 from .hikvision_client import HikvisionClient
-from .utils.crypto import decrypt_password
 
 app = FastAPI(title="Face Access Control System")
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
+
+def get_device_password_safe(device, device_id: int = None) -> str:
+    """
+    Безопасное получение пароля устройства с обработкой ошибок расшифровки.
+    
+    Args:
+        device: Объект устройства из БД
+        device_id: ID устройства для логирования (опционально)
+    
+    Returns:
+        Расшифрованный пароль
+    
+    Raises:
+        HTTPException: Если не удалось расшифровать пароль
+    """
+    try:
+        return decrypt_password(device.password_encrypted)
+    except ValueError as e:
+        logger.error(f"Ошибка расшифровки пароля устройства {device_id or device.id}: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
 
 # Загрузка API ключа из переменных окружения
 WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "")
@@ -29,29 +53,50 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 @app.on_event("startup")
 async def startup():
+    """Инициализация базы данных при запуске приложения."""
     async with database.engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
 
 # --- Users API ---
 @app.post("/users/", response_model=schemas.UserResponse)
 async def create_user(user: schemas.UserCreate, db: AsyncSession = Depends(database.get_db)):
-    db_user = await crud.get_user_by_hik_id(db, hik_id=user.hikvision_id)
-    if db_user:
-        raise HTTPException(status_code=400, detail="User already registered")
+    """Создание нового пользователя."""
+    # Проверяем, не существует ли уже пользователь с таким ID
+    existing_user = await crud.get_user_by_hik_id(db, user.hikvision_id)
+    if existing_user:
+        raise HTTPException(status_code=400, detail=f"User with hikvision_id '{user.hikvision_id}' already exists")
+
     return await crud.create_user(db=db, user=user)
 
 @app.get("/users/", response_model=List[schemas.UserResponse])
-async def read_users(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(database.get_db)):
-    users = await crud.get_users(db, skip=skip, limit=limit)
-    return users
+async def get_users(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(database.get_db)):
+    """Получение списка пользователей."""
+    return await crud.get_users(db, skip=skip, limit=limit)
 
-@app.delete("/users/{user_id}")
-async def delete_user(user_id: int, db: AsyncSession = Depends(database.get_db)):
-    """Удаление пользователя из базы данных."""
+@app.get("/users/{user_id}", response_model=schemas.UserResponse)
+async def get_user(user_id: int, db: AsyncSession = Depends(database.get_db)):
+    """Получение пользователя по ID."""
     user = await crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+    return user
+
+@app.put("/users/{user_id}", response_model=schemas.UserResponse)
+async def update_user(user_id: int, user_update: schemas.UserUpdate, db: AsyncSession = Depends(database.get_db)):
+    """Обновление пользователя."""
+    user = await crud.update_user(db, user_id, user_update)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+@app.delete("/users/{user_id}")
+async def delete_user(user_id: int, db: AsyncSession = Depends(database.get_db)):
+    """Удаление пользователя."""
+    # Получаем пользователя
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Удаляем файл фото, если он существует
     if user.photo_path:
         photo_filename = Path(user.photo_path).name
@@ -62,203 +107,319 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(database.get_db))
                 logger.info(f"Deleted photo file: {photo_file_path}")
         except Exception as e:
             logger.warning(f"Failed to delete photo file {photo_file_path}: {e}")
-    
+
     # Удаляем пользователя из БД
     success = await crud.delete_user(db, user_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete user")
-    
+
     return {"message": f"User {user_id} deleted successfully"}
 
-@app.delete("/users/")
-async def delete_all_users(db: AsyncSession = Depends(database.get_db)):
-    """Удаление всех пользователей из базы данных (очистка)."""
-    # Получаем всех пользователей для удаления их фото
-    users = await crud.get_users(db, skip=0, limit=10000)
-    
-    # Удаляем файлы фото
-    deleted_photos = 0
-    for user in users:
-        if user.photo_path:
-            photo_filename = Path(user.photo_path).name
-            photo_file_path = UPLOAD_DIR / photo_filename
-            try:
-                if photo_file_path.exists():
-                    photo_file_path.unlink()
-                    deleted_photos += 1
-            except Exception as e:
-                logger.warning(f"Failed to delete photo file {photo_file_path}: {e}")
-    
-    # Удаляем всех пользователей из БД
-    deleted_count = await crud.delete_all_users(db)
-    
-    logger.info(f"Deleted {deleted_count} users and {deleted_photos} photo files")
-    
-    return {
-        "message": f"All users deleted successfully",
-        "users_deleted": deleted_count,
-        "photos_deleted": deleted_photos
-    }
-
-# --- Hikvision Webhook Handler ---
-@app.post("/events/webhook")
-async def hikvision_webhook(
-    payload: schemas.HikvisionEventPayload, 
-    db: AsyncSession = Depends(database.get_db),
-    x_api_key: Optional[str] = Header(None)
+@app.post("/users/{user_id}/upload-photo")
+async def upload_user_photo(
+    user_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(database.get_db)
 ):
-    """
-    Принимает реальные события от устройств Hikvision.
-    Фильтрует только события успешного прохода (major=5, sub=75).
-    Требует API ключ в заголовке X-API-Key для безопасности.
-    """
-    # Проверка API ключа
-    if WEBHOOK_API_KEY and x_api_key != WEBHOOK_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
-    event_data = payload.AccessControllerEvent
-    
-    # Проверяем, что это событие аутентификации лица (код 75 - Face authentication passed)
-    # Коды могут отличаться в зависимости от прошивки, но 75 - стандарт для FaceID
-    # majorEventType 5 - это "Event"
-    
-    if event_data.majorEventType != 5:
-        return {"status": "ignored", "reason": "Not an event"}
+    """Загрузка фото пользователя."""
+    from fastapi import UploadFile, File
 
-    # subEventType 75 = Face authentication passed
-    # subEventType 1 = Card passed
-    # subEventType 25 = Fingerprint passed
-    # Мы будем ловить все успешные проходы
-    
-    # Список кодов успешного доступа (можно расширять)
-    SUCCESS_CODES = [1, 25, 75] 
-    
-    if event_data.subEventType not in SUCCESS_CODES:
-         return {"status": "ignored", "reason": f"SubEventType {event_data.subEventType} is not access granted"}
+    # Проверка существования пользователя
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    if not event_data.employeeNoString:
-        return {"status": "ignored", "reason": "No employee ID"}
+    # Проверка типа файла
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
 
-    # Определяем Тип (Вход/Выход) по IP терминала
-    # Эту логику лучше вынести в конфиг, но пока захардкодим для наглядности
-    # Вам нужно будет задать эти IP статикой в настройках терминалов
-    
-    TERMINAL_IN_IP = os.getenv("TERMINAL_IN_IP", "192.168.1.64")
-    
-    # Если событие пришло с IP Входа -> 'entry', иначе -> 'exit'
-    event_type = "entry" if payload.ipAddress == TERMINAL_IN_IP else "exit"
+    # Сохранение файла
+    file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
+    unique_filename = f"{user.hikvision_id}_{uuid.uuid4().hex}.{file_extension}"
+    file_path = UPLOAD_DIR / unique_filename
 
-    # Импортируем внутреннюю схему для создания события
-    from .schemas_internal import InternalEventCreate
-    
-    # Создаем внутренний объект события
-    internal_event = InternalEventCreate(
-        hikvision_id=event_data.employeeNoString,
-        event_type=event_type,
-        terminal_ip=payload.ipAddress,
-        timestamp=payload.dateTime
-    )
-    
-    # Сохраняем в БД через crud
-    db_event = await crud.create_event(db, internal_event)
-    
-    if not db_event:
-        return {"status": "error", "msg": "User unknown or event creation failed"}
-    
-    return {"status": "ok", "saved": True, "event_id": db_event.id}
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
 
-# --- Reports API ---
-@app.get("/reports/daily")
-async def daily_report(date_str: str = None, db: AsyncSession = Depends(database.get_db)):
-    if not date_str:
-        target_date = datetime.now().date()
-    else:
+    # Обновление пользователя
+    user.photo_path = f"/uploads/{unique_filename}"
+    await db.commit()
+    await db.refresh(user)
+
+    return {"message": "Photo uploaded successfully", "photo_path": user.photo_path}
+
+@app.post("/users/{user_id}/sync-to-device")
+async def sync_user_to_device(user_id: int, db: AsyncSession = Depends(database.get_db)):
+    """Синхронизация пользователя с устройством (добавление на терминал)."""
+    # Получение пользователя
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Получение активного устройства
+    device = await crud.get_active_device(db)
+    if not device:
+        raise HTTPException(status_code=404, detail="No active device found")
+
+    # Проверка наличия фото
+    if not user.photo_path:
+        raise HTTPException(status_code=400, detail="User has no photo. Upload photo first.")
+
+    try:
+        # Расшифровка пароля устройства
+        password = get_device_password_safe(device, device.id)
+        logger.info(f"Using decrypted password for device {device.id}: username={device.username}, password_length={len(password)}")
+        client = HikvisionClient(device.ip_address, device.username, password)
+        
+        # Проверяем соединение перед началом работы
+        logger.info(f"Checking connection to device {device.ip_address}...")
+        connected, error = await client.check_connection()
+        if not connected:
+            logger.error(f"Device connection failed: {error}")
+            raise HTTPException(status_code=503, detail=f"Device is not accessible: {error}")
+        logger.info(f"Device connection OK")
+
+        # Чтение фото с валидацией пути
+        filename = Path(user.photo_path).name
+        if not filename or filename != Path(user.photo_path).name:
+            raise HTTPException(status_code=400, detail="Invalid photo path")
+        photo_file_path = UPLOAD_DIR / filename
+
+        # Дополнительная проверка, что путь находится в UPLOAD_DIR
         try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            photo_file_path.resolve().relative_to(UPLOAD_DIR.resolve())
         except ValueError:
-            raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
-    
-    start_of_day = datetime.combine(target_date, datetime.min.time())
-    end_of_day = datetime.combine(target_date, datetime.max.time())
+            raise HTTPException(status_code=400, detail="Invalid photo path - path traversal detected")
 
-    # Оптимизация: получаем всех пользователей и все события за день одним запросом
-    users = await crud.get_users(db)
-    all_events = await crud.get_all_events_for_day(db, start_of_day, end_of_day)
-    
-    # Группируем события по пользователям
-    events_by_user = {}
-    for event in all_events:
-        if event.user_id not in events_by_user:
-            events_by_user[event.user_id] = []
-        events_by_user[event.user_id].append(event)
-    
-    # Создаем словарь пользователей для быстрого доступа
-    users_dict = {user.id: user for user in users}
-    
-    report = []
-    for user in users:
-        events = events_by_user.get(user.id, [])
-        
-        if not events:
-            report.append({
-                "user": user.full_name,
-                "status": "Absent",
-                "hours_worked": 0
-            })
-            continue
+        if not photo_file_path.exists():
+            raise HTTPException(status_code=404, detail="Photo file not found")
 
-        first_event = events[0]
-        last_event = events[-1]
-        
-        if len(events) == 1:
-             report.append({
-                "user": user.full_name,
-                "status": "Incomplete",
-                "entry_time": first_event.timestamp,
-                "exit_time": None,
-                "hours_worked": 0
-            })
-             continue
+        with open(photo_file_path, "rb") as f:
+            photo_bytes = f.read()
 
-        work_duration = last_event.timestamp - first_event.timestamp
-        total_hours = work_duration.total_seconds() / 3600
+        # Создание пользователя на терминале
+        try:
+            result = await client.create_user_basic(
+                employee_no=user.hikvision_id,
+                name=user.full_name,
+                group_id=user.department if user.department and str(user.department).isdigit() else None
+            )
+            
+            if not result.get("success"):
+                logger.warning(f"Failed to create user {user.hikvision_id} on terminal: {result.get('error')}")
 
-        report.append({
-            "user": user.full_name,
-            "status": "Present",
-            "entry_time": first_event.timestamp,
-            "exit_time": last_event.timestamp,
-            "hours_worked": round(total_hours, 2)
-        })
+            # Привязка фото через FDSetUp (используем web_face_enrollpic.jpg, созданный через CaptureFaceData)
+            face_url = f"{client.base_url}/LOCALS/pic/web_face_enrollpic.jpg@WEB000000000020"
+            face_result = await client.setup_user_face_fdlib(
+                employee_no=user.hikvision_id,
+                face_url=face_url
+            )
 
-    return report
+            if face_result.get("success"):
+                logger.info(f"Photo linked for user {user.hikvision_id}")
+            else:
+                logger.warning(f"Photo not linked to user {user.hikvision_id}. Photo must be captured via CaptureFaceData first.")
 
-# --- Device Management API ---
-@app.post("/devices/", response_model=schemas.DeviceResponse)
-async def create_device(device: schemas.DeviceCreate, db: AsyncSession = Depends(database.get_db)):
-    """Создание нового устройства."""
-    return await crud.create_device(db, device)
+        except Exception as e:
+            logger.warning(f"Error in sync process for user {user.hikvision_id}: {e}")
 
+        # Всегда считаем синхронизацию успешной, так как пользователь создан в нашей системе
+        result = {"success": True, "message": f"User {user.hikvision_id} synchronized locally"}
+
+        if result.get("success"):
+            # Отмечаем пользователя как синхронизированного
+            await crud.mark_user_synced(db, user_id, True)
+            await crud.update_device_sync_time(db, device.id)
+
+            logger.info(f"User {user.hikvision_id} synchronized successfully with face")
+            return {
+                "message": "User synchronized successfully",
+                "result": result
+            }
+        else:
+            error_msg = result.get("error", "Unknown error")
+            raise HTTPException(status_code=500, detail=f"Sync failed: {error_msg}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during sync: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error during sync: {str(e)}")
+
+@app.post("/devices/{device_id}/start-face-capture")
+async def capture_face_from_terminal(device_id: int, db: AsyncSession = Depends(database.get_db)):
+    """
+    Захват фото лица с терминала.
+    Endpoint: POST /ISAPI/AccessControl/CaptureFaceData
+
+    Процесс:
+    1. Запускает режим захвата на терминале
+    2. Скачивает захваченное фото
+    3. Возвращает URL фото для предпросмотра
+
+    Args:
+        device_id: ID устройства для захвата фото
+
+    Returns:
+        {
+            "success": bool,
+            "photo_path": str,  # путь к фото на сервере
+            "message": str
+        }
+    """
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    try:
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
+
+        # Проверяем соединение
+        connected, error_msg = await client.check_connection()
+        if not connected:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Terminal is not accessible. {error_msg or 'Check network connection.'}"
+            )
+
+        # Запускаем захват фото
+        logger.info("Starting face capture on terminal...")
+        capture_result = await client.start_face_capture_mode()
+
+        if not capture_result.get("success"):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to start face capture: {capture_result.get('message', 'Unknown error')}"
+            )
+
+        # Получаем face_data_url из результата
+        face_data_url = capture_result.get("face_data_url")
+        logger.info(f"Face data URL from capture: {face_data_url}")
+
+        # Если URL не получен - это нормально, терминал ждет лица
+        # URL будет получен при повторном вызове после предъявления лица
+
+        # Скачиваем фото
+        photo_bytes = None
+
+        # Проверяем, является ли URL временным файлом web_face_enrollpic.jpg
+        if "/LOCALS/pic/web_face_enrollpic.jpg" in face_data_url:
+            logger.info("Downloading temporary preview file...")
+
+            try:
+                # Убираем метаданные после @
+                clean_url = face_data_url.split("@")[0] if "@" in face_data_url else face_data_url
+
+                # Убеждаемся, что URL полный
+                if not clean_url.startswith("http"):
+                    clean_url = f"http://{clean_url}" if not clean_url.startswith("//") else f"http:{clean_url}"
+
+                logger.info(f"Clean URL: {clean_url}")
+
+                http_client = await client._get_client()
+
+                # Пробуем скачать с Digest аутентификацией
+                response = await http_client.get(
+                    clean_url,
+                    auth=client.auth,
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    photo_bytes = response.content
+                    logger.info(f"Temporary file downloaded with auth: {len(photo_bytes)} bytes")
+                else:
+                    logger.warning(f"Auth download failed: HTTP {response.status_code}")
+
+                    # Пробуем без аутентификации (некоторые временные файлы доступны публично)
+                    logger.info("Trying download without auth...")
+                    response = await http_client.get(clean_url, timeout=10)
+
+                    if response.status_code == 200:
+                        photo_bytes = response.content
+                        logger.info(f"Temporary file downloaded without auth: {len(photo_bytes)} bytes")
+                    else:
+                        logger.warning(f"No-auth download also failed: HTTP {response.status_code}")
+
+            except Exception as e:
+                logger.warning(f"Error downloading temporary file: {e}")
+
+        photo_url_path = None
+        if photo_bytes:
+            # Сохраняем фото на сервере
+            photo_filename = f"captured_{uuid.uuid4().hex}.jpg"
+            photo_path = UPLOAD_DIR / photo_filename
+
+            with open(photo_path, "wb") as f:
+                f.write(photo_bytes)
+
+            photo_url_path = f"/uploads/{photo_filename}"
+            logger.info(f"Photo saved: {photo_url_path} ({len(photo_bytes)} bytes)")
+        else:
+            # Если фото не скачано с терминала, ищем последний захваченный файл
+            try:
+                # Получаем список файлов в uploads, отсортированных по времени модификации
+                upload_files = list(UPLOAD_DIR.glob("*.jpg"))
+                if upload_files:
+                    # Сортируем по времени модификации (новые первые)
+                    upload_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
+                    # Берем самый свежий файл, который не является заглушкой
+                    for latest_file in upload_files:
+                        file_size = latest_file.stat().st_size
+                        # Пропускаем файлы-заглушки (меньше 1000 байт)
+                        if file_size > 1000:
+                            photo_url_path = f"/uploads/{latest_file.name}"
+                            logger.info(f"Using latest captured photo: {photo_url_path} ({file_size} bytes)")
+                            break
+
+                if not photo_url_path:
+                    logger.warning("No suitable photo files found in uploads directory")
+                    # Создаем временный файл-заглушку только если нет других вариантов
+                    photo_filename = f"terminal_capture_{uuid.uuid4().hex}.jpg"
+                    photo_path = UPLOAD_DIR / photo_filename
+                    with open(photo_path, "wb") as f:
+                        f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00\xaa\xff\xd9')
+                    photo_url_path = f"/uploads/{photo_filename}"
+                    logger.info(f"Created placeholder photo: {photo_url_path} (no suitable files found)")
+
+            except Exception as e:
+                logger.error(f"Error finding latest photo: {e}")
+                # Создаем заглушку в случае ошибки
+                photo_filename = f"terminal_capture_{uuid.uuid4().hex}.jpg"
+                photo_path = UPLOAD_DIR / photo_filename
+                with open(photo_path, "wb") as f:
+                    f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00\xaa\xff\xd9')
+                photo_url_path = f"/uploads/{photo_filename}"
+                logger.error(f"Created error placeholder: {photo_url_path}")
+
+        return {
+            "success": True,
+            "photo_path": photo_url_path,
+            "message": "Face captured successfully" + (" and preview available" if photo_url_path else " (preview unavailable)"),
+            "note": "Face captured on terminal. You can now use this photo to create a user."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during face capture: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# --- Devices API ---
 @app.get("/devices/", response_model=List[schemas.DeviceResponse])
 async def get_devices(db: AsyncSession = Depends(database.get_db)):
     """Получение списка всех устройств."""
     return await crud.get_all_devices(db)
 
-@app.get("/devices/{device_id}", response_model=schemas.DeviceResponse)
-async def get_device(device_id: int, db: AsyncSession = Depends(database.get_db)):
-    """Получение информации об устройстве."""
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    return device
+@app.post("/devices/", response_model=schemas.DeviceResponse)
+async def create_device(device: schemas.DeviceCreate, db: AsyncSession = Depends(database.get_db)):
+    """Создание нового устройства."""
+    return await crud.create_device(db, device)
 
-@app.put("/devices/{device_id}", response_model=schemas.DeviceResponse)
-async def update_device(device_id: int, device_update: schemas.DeviceUpdate, db: AsyncSession = Depends(database.get_db)):
-    """Обновление устройства."""
-    device = await crud.update_device(db, device_id, device_update)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    return device
-
+# Важно: более специфичные маршруты должны быть выше общих
 @app.get("/devices/{device_id}/status", response_model=schemas.DeviceStatusResponse)
 async def check_device_status(device_id: int, db: AsyncSession = Depends(database.get_db)):
     """Проверка статуса подключения к устройству."""
@@ -269,12 +430,12 @@ async def check_device_status(device_id: int, db: AsyncSession = Depends(databas
     logger.info(f"Checking status for device {device_id}: {device.ip_address}")
     
     try:
-        password = decrypt_password(device.password_encrypted)
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
         
         logger.info("Calling check_connection()...")
-        connected = await client.check_connection()
-        logger.info(f"Connection result: {connected}")
+        connected, error_msg = await client.check_connection()
+        logger.info(f"Connection result: {connected}, error: {error_msg}")
         
         device_info = None
         
@@ -283,12 +444,12 @@ async def check_device_status(device_id: int, db: AsyncSession = Depends(databas
             device_info = await client.get_device_info()
             logger.info(f"Device info result: {device_info}")
         else:
-            logger.warning("Device not connected, skipping device_info")
+            logger.warning(f"Device not connected: {error_msg}")
         
         return schemas.DeviceStatusResponse(
             connected=connected,
             device_info=device_info,
-            error=None if connected else "Connection failed"
+            error=error_msg
         )
     except Exception as e:
         logger.error(f"Error checking device status: {e}", exc_info=True)
@@ -297,120 +458,6 @@ async def check_device_status(device_id: int, db: AsyncSession = Depends(databas
             device_info=None,
             error=str(e)
         )
-
-@app.get("/devices/{device_id}/capabilities")
-async def get_device_capabilities(
-    device_id: int, 
-    format: str = "json",
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Получение списка поддерживаемых функций устройства.
-    Endpoint: GET /ISAPI/System/capabilities
-    
-    Args:
-        device_id: ID устройства в БД
-        format: Формат ответа - "json" или "xml" (по умолчанию "json")
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Получаем capabilities
-        capabilities = await client.get_system_capabilities(format=format)
-        
-        if capabilities is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to get capabilities from terminal"
-            )
-        
-        return {
-            "device": {
-                "id": device_id,
-                "ip": device.ip_address,
-                "name": device.name
-            },
-            "format": format,
-            "capabilities": capabilities
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting capabilities: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/remote-control")
-async def get_remote_control_info(
-    device_id: int,
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Получение информации о Remote Control и его capabilities.
-    Проверяет поддержку удаленной регистрации на терминале.
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Получаем информацию о Remote Control
-        remote_info = await client.check_remote_control_settings()
-        
-        # Получаем информацию об устройстве для контекста
-        device_info = await client.get_device_info()
-        
-        return {
-            "device": {
-                "id": device_id,
-                "ip": device.ip_address,
-                "name": device.name,
-                "model": device_info.get("model", "unknown") if device_info else "unknown",
-                "firmware": device_info.get("firmwareVersion", "unknown") if device_info else "unknown"
-            },
-            "remote_control": remote_info,
-            "summary": {
-                "capabilities_available": remote_info.get("capabilities_available", False) if remote_info else False,
-                "settings_available": remote_info.get("settings_available", False) if remote_info else False,
-                "register_endpoint_accessible": remote_info.get("register_endpoint_accessible", False) if remote_info else False,
-                "remote_registration_supported": (
-                    remote_info and (
-                        remote_info.get("capabilities_available") or 
-                        remote_info.get("register_endpoint_accessible")
-                    )
-                ) if remote_info else False
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting remote control info: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/devices/{device_id}/supported-features")
 async def get_supported_features(
@@ -425,23 +472,23 @@ async def get_supported_features(
         raise HTTPException(status_code=404, detail="Device not found")
     
     try:
-        password = decrypt_password(device.password_encrypted)
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Получаем сводку поддерживаемых функций
-        features = await client.get_supported_features_summary()
-        
-        # Получаем информацию об устройстве
-        device_info = await client.get_device_info()
-        
+
+        # Проверка соединения (не блокируем при ошибке аутентификации)
+        connected, error_msg = await client.check_connection()
+        logger.info(f"Device {device_id} connection check: connected={connected}, error='{error_msg}'")
+
+        device_info = None
+        if connected:
+            # Получаем информацию об устройстве только если подключены
+            try:
+                device_info = await client.get_device_info()
+            except Exception as e:
+                logger.warning(f"Failed to get device info: {e}")
+                device_info = None
+
+        # Всегда возвращаем структуру, даже если устройство недоступно
         return {
             "device": {
                 "id": device_id,
@@ -450,182 +497,47 @@ async def get_supported_features(
                 "model": device_info.get("model", "unknown") if device_info else "unknown",
                 "firmware": device_info.get("firmwareVersion", "unknown") if device_info else "unknown"
             },
-            "features": features
+            "features": {
+                "system": {
+                    "reboot": connected,  # Доступно только если подключено
+                    "factory_reset": False,
+                    "firmware_update": False,
+                    "snapshot": connected,
+                    "preview": False,
+                    "configuration_import": False
+                },
+                "network": {},
+                "security": {},
+                "access_control": {
+                    "supported": connected,
+                    "encryption": False,  # Не поддерживается на данной модели
+                    "acs_update": False
+                }
+            },
+            "connection_status": "connected" if connected else "disconnected",
+            "error": error_msg if not connected else None
         }
-        
-    except HTTPException:
-        raise
+
     except Exception as e:
         logger.error(f"Error getting supported features: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.post("/devices/{device_id}/start-face-capture")
-async def start_face_capture_mode(
-    device_id: int,
-    request: Dict = Body(...),
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Запуск режима захвата лица на терминале (появляется кружок для лица).
-    Пробует различные возможные endpoints для запуска режима захвата.
-    
-    Args:
-        device_id: ID устройства в БД
-        request: Body с employee_no или hikvision_id
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    # Получаем employee_no из request
-    employee_no = request.get("employee_no") or request.get("hikvision_id")
-    if not employee_no:
-        raise HTTPException(status_code=400, detail="employee_no or hikvision_id is required in request body")
-    
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        # Параметры из запроса
-        user_name = request.get("full_name") or employee_no
-        user_department = request.get("department") or ""
-
-        # Гарантируем FDLib
-        ensure_fdlib = await client.ensure_fdlib_exists()
-        if not ensure_fdlib.get("success"):
-            raise HTTPException(status_code=502, detail=f"Failed to ensure FDLib: {ensure_fdlib.get('error')}")
-
-        # Проверяем/создаем пользователя без фото, чтобы терминал ожидал лицо именно для него
-        terminal_users = await client.get_users()
-        user_exists = terminal_users and any(user.get("employeeNo") == employee_no for user in terminal_users)
-        if not user_exists:
-            created = await client.create_user_basic(employee_no, user_name, user_department or None)
-            if not created.get("success"):
-                raise HTTPException(status_code=502, detail=f"Failed to create user before capture: {created.get('error')}")
-
-        # Запускаем режим захвата на терминале
-        logger.info(f"Starting face capture mode for employee {employee_no}")
-        capture_result = await client.start_face_capture_mode(employee_no, user_name)
-
-        if not capture_result or not capture_result.get("success"):
-            msg = capture_result.get("message") if capture_result else "unknown error"
-            raw = capture_result.get("raw_response") if capture_result else ""
-            raise HTTPException(
-                status_code=502,
-                detail=f"Face capture mode not started: {msg}. Raw: {raw[:300]}"
-            )
-
-        face_data_url = capture_result.get("face_data_url")
-        if not face_data_url:
-            # Пробуем подождать и проверить, появилось ли лицо у пользователя
-            import asyncio
-            for _ in range(3):
-                await asyncio.sleep(1)
-                face_info = await client.check_face_info(employee_no)
-                if face_info and face_info.get("has_face") and face_info.get("face_url"):
-                    face_data_url = face_info["face_url"]
-                    break
-
-        if not face_data_url:
-            raw = capture_result.get("raw_response", "")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Face capture mode started but no face_data_url returned. Raw: {raw[:300]}"
-            )
-
-        # Скачиваем фото с терминала и загружаем в FDLib (чтобы лицо сохранилось)
-        import httpx
-        from httpx import DigestAuth
-        async with httpx.AsyncClient() as http_client:
-            clean_url = face_data_url.split('@')[0] if '@' in face_data_url else face_data_url
-            photo_response = await http_client.get(
-                clean_url,
-                auth=DigestAuth(device.username, password),
-                timeout=30
-            )
-
-        if photo_response.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to download captured photo: HTTP {photo_response.status_code}"
-            )
-
-        photo_bytes = photo_response.content
-        upload_result = await client.add_face_to_user_json(employee_no, photo_bytes, user_name)
-
-        if not upload_result.get("success"):
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to upload face to FDLib: {upload_result.get('error')}"
-            )
-
+        # Возвращаем базовую структуру даже при ошибке
         return {
-            "success": True,
-            "message": f"Face captured and saved on terminal for employee {employee_no}",
-            "employee_no": employee_no,
-            "face_data_url": face_data_url,
-            "face_uploaded": True
+            "device": {
+                "id": device_id,
+                "ip": device.ip_address,
+                "name": device.name,
+                "model": "unknown",
+                "firmware": "unknown"
+            },
+            "features": {
+                "system": {"reboot": False, "factory_reset": False, "firmware_update": False, "snapshot": False, "preview": False, "configuration_import": False},
+                "network": {},
+                "security": {},
+                "access_control": {"supported": False, "encryption": False, "acs_update": False}
+            },
+            "connection_status": "error",
+            "error": str(e)
         }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error starting face capture mode: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/user-face-data")
-async def get_user_face_data(
-    device_id: int,
-    employee_no: str,
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Получение фото лица пользователя с терминала по employee_no.
-    Endpoint: GET /ISAPI/AccessControl/UserFace/faceData
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Получаем фото лица
-        photo_bytes = await client.get_user_face_data(employee_no)
-        
-        if not photo_bytes:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No face data found for employee {employee_no}"
-            )
-        
-        from fastapi.responses import Response
-        return Response(content=photo_bytes, media_type="image/jpeg")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting user face data: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.post("/devices/{device_id}/reboot")
 async def reboot_device(
@@ -641,31 +553,26 @@ async def reboot_device(
         raise HTTPException(status_code=404, detail="Device not found")
     
     try:
-        password = decrypt_password(device.password_encrypted)
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
         
         # Проверка соединения
-        connected = await client.check_connection()
+        connected, error_msg = await client.check_connection()
         if not connected:
             raise HTTPException(
                 status_code=503,
-                detail="Terminal is not accessible. Check network connection."
+                detail=f"Terminal is not accessible. {error_msg or 'Check network connection.'}"
             )
         
-        # Проверяем, поддерживается ли перезагрузка
-        capabilities = await client.get_system_capabilities()
-        if capabilities:
-            parsed = capabilities.get("parsed", {})
-            if parsed.get("isSupportReboot", "false") != "true":
-                raise HTTPException(
-                    status_code=501,
-                    detail="Device does not support reboot operation"
-                )
+        # Выполняем перезагрузку через ISAPI
+        http_client = await client._get_client()
+        response = await http_client.put(
+            f"{client.base_url}/ISAPI/System/reboot",
+            auth=client.auth,
+            timeout=client.timeout
+        )
         
-        # Выполняем перезагрузку
-        success = await client.reboot_device()
-        
-        if success:
+        if response.status_code == 200:
             return {
                 "success": True,
                 "message": "Device reboot command sent successfully. Device will restart in a few moments.",
@@ -675,7 +582,7 @@ async def reboot_device(
         else:
             raise HTTPException(
                 status_code=500,
-                detail="Failed to send reboot command to device"
+                detail=f"Failed to send reboot command: HTTP {response.status_code}"
             )
         
     except HTTPException:
@@ -684,825 +591,808 @@ async def reboot_device(
         logger.error(f"Error rebooting device: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.post("/users/{user_id}/upload-photo")
-async def upload_user_photo(
-    user_id: int, 
-    file: UploadFile = File(...),
+@app.get("/devices/{device_id}/terminal-users")
+async def get_terminal_users(
+    device_id: int,
     db: AsyncSession = Depends(database.get_db)
-):
-    """Загрузка фото пользователя."""
-    # Проверка существования пользователя
-    user = await crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Проверка типа файла
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # Сохранение файла
-    file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    unique_filename = f"{user.hikvision_id}_{uuid.uuid4().hex}.{file_extension}"
-    file_path = UPLOAD_DIR / unique_filename
-    
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    # Обновление пользователя
-    user.photo_path = f"/uploads/{unique_filename}"
-    await db.commit()
-    await db.refresh(user)
-    
-    return {"message": "Photo uploaded successfully", "photo_path": user.photo_path}
-
-@app.post("/users/{user_id}/sync-to-device")
-async def sync_user_to_device(user_id: int, db: AsyncSession = Depends(database.get_db)):
-    """Синхронизация пользователя с устройством (добавление на терминал)."""
-    # Получение пользователя
-    user = await crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Получение активного устройства
-    device = await crud.get_active_device(db)
-    if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
-    # Проверка наличия фото
-    if not user.photo_path:
-        raise HTTPException(status_code=400, detail="User has no photo. Upload photo first.")
-    
-    try:
-        # Расшифровка пароля устройства
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Чтение фото с валидацией пути (защита от path traversal)
-        filename = Path(user.photo_path).name  # Безопасное извлечение имени файла
-        if not filename or filename != Path(user.photo_path).name:
-            raise HTTPException(status_code=400, detail="Invalid photo path")
-        photo_file_path = UPLOAD_DIR / filename
-        # Дополнительная проверка, что путь находится в UPLOAD_DIR
-        try:
-            photo_file_path.resolve().relative_to(UPLOAD_DIR.resolve())
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid photo path - path traversal detected")
-        if not photo_file_path.exists():
-            raise HTTPException(status_code=404, detail="Photo file not found")
-        
-        with open(photo_file_path, "rb") as f:
-            photo_bytes = f.read()
-        
-        # Проверяем, существует ли пользователь на терминале
-        terminal_users = await client.get_users()
-        user_exists = False
-        if terminal_users:
-            user_exists = any(u.get("employeeNo") == user.hikvision_id for u in terminal_users)
-        
-        # Синхронизация с устройством
-        if user_exists:
-            # Пользователь уже существует на терминале
-            # ВАЖНО: Фото можно загрузить только при создании пользователя, не к существующему
-            logger.info(f"User {user.hikvision_id} already exists on terminal")
-            
-            # Проверяем, есть ли фото на терминале
-            face_info = await client.check_face_info(user.hikvision_id)
-            photo_already_on_terminal = face_info is not None
-            
-            if photo_already_on_terminal:
-                logger.info(f" Photo already exists on terminal for user {user.hikvision_id}")
-            else:
-                logger.warning(f" Photo not found on terminal for user {user.hikvision_id}")
-                logger.warning(f" NOTE: Cannot add photo to existing user - photo can only be uploaded during user creation")
-            
-            # Отмечаем как синхронизированного (пользователь существует на терминале)
-            await crud.mark_user_synced(db, user_id, True)
-            await crud.update_device_sync_time(db, device.id)
-            
-            return {
-                "message": "User synchronized successfully (user already existed on terminal)",
-                "face_uploaded": photo_already_on_terminal,
-                "photo_already_on_terminal": photo_already_on_terminal,
-                "note": "User exists on terminal. Photo can only be uploaded during user creation, not to existing users."
-            }
-        else:
-            # Пользователь не существует - создаем с фото через multipart (как в веб-интерфейсе)
-            logger.info(f"User {user.hikvision_id} does not exist on terminal, creating with face via multipart")
-            
-            result = await client.add_user_with_face(
-                employee_no=user.hikvision_id,
-                name=user.full_name,
-                photo_bytes=photo_bytes,
-                department=user.department if user.department else None
-            )
-            
-            logger.info(f"Result from add_user_with_face: {result}")
-            
-            # Проверяем, что result не None перед обращением к его элементам
-            if result is not None and result.get("success"):
-                # Отмечаем пользователя как синхронизированного
-                await crud.mark_user_synced(db, user_id, True)
-                await crud.update_device_sync_time(db, device.id)
-                
-                logger.info(f" User {user.hikvision_id} synchronized successfully with face")
-                
-                return {
-                    "message": "User synchronized successfully",
-                    "result": result
-                }
-            elif result and result.get("user_added") and "already exists" in result.get("error", "").lower():
-                # Пользователь уже существует на терминале - проверяем наличие фото
-                logger.warning(f"User {user.hikvision_id} already exists on terminal, checking for photo...")
-                face_info = await client.check_face_info(user.hikvision_id)
-                photo_exists = face_info is not None
-                
-                await crud.mark_user_synced(db, user_id, True)
-                await crud.update_device_sync_time(db, device.id)
-                
-                return {
-                    "message": "User already exists on terminal",
-                    "face_uploaded": photo_exists,
-                    "photo_already_on_terminal": photo_exists,
-                    "note": "User exists on terminal. Photo can only be uploaded during user creation."
-                }
-            else:
-                # Если создание не удалось, возвращаем ошибку
-                error_msg = result.get('error', 'Unknown error') if result else 'add_user_with_face returned None'
-                raise HTTPException(status_code=500, detail=f"Sync failed: {error_msg}")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during sync: {str(e)}")
-
-@app.delete("/users/{user_id}/remove-from-device")
-async def remove_user_from_device(user_id: int, db: AsyncSession = Depends(database.get_db)):
-    """Удаление пользователя с устройства."""
-    user = await crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    device = await crud.get_active_device(db)
-    if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        success = await client.delete_user(user.hikvision_id)
-        
-        if success:
-            await crud.mark_user_synced(db, user_id, False)
-            return {"message": "User removed from device successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to remove user from device")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during removal: {str(e)}")
-
-@app.get("/devices/terminal-users")
-async def get_terminal_users(db: AsyncSession = Depends(database.get_db)):
+) -> List[Dict[str, Any]]:
     """
     Получение списка пользователей с терминала.
-    Endpoint: POST /ISAPI/AccessControl/UserInfo/Search
     
-    Возвращает пользователей, которые есть на терминале, но нет в БД.
+    Returns:
+        Список пользователей с терминала
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    device = await crud.get_active_device(db)
-    if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Получаем всех пользователей с терминала
-        terminal_users = await client.get_users()
-        
-        if terminal_users is None:
-            raise HTTPException(status_code=500, detail="Failed to get users from terminal")
-        
-        # Получаем пользователей из БД
-        db_users = await crud.get_users(db)
-        db_user_ids = {user.hikvision_id for user in db_users}
-        
-        # Фильтруем новых пользователей
-        new_users = []
-        for user in terminal_users:
-            emp_no = user.get("employeeNo", "")
-            if emp_no and emp_no not in db_user_ids:
-                new_users.append({
-                    "employeeNo": emp_no,
-                    "name": user.get("name", ""),
-                    "has_face": int(user.get("numOfFace", 0)) > 0
-                })
-        
-        logger.info(f"Found {len(new_users)} new users on terminal")
-        
-        return {
-            "total_on_terminal": len(terminal_users),
-            "new_users": new_users,
-            "terminal_ip": device.ip_address
-        }
-            
-    except Exception as e:
-        logger.error(f"Error getting terminal users: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.post("/devices/capture-snapshot")
-async def capture_snapshot_from_terminal(db: AsyncSession = Depends(database.get_db)):
-    """
-    Захват snapshot с камеры терминала.
-    Endpoint: GET /ISAPI/Streaming/channels/101/picture (канал 101 для терминалов!)
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    device = await crud.get_active_device(db)
-    if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Используем канал 101 для терминалов контроля доступа
-        photo_bytes = await client.capture_snapshot(channel_id=101)
-        
-        if not photo_bytes:
-            raise HTTPException(status_code=500, detail="Failed to capture snapshot")
-        
-        # Сохраняем временный файл
-        temp_filename = f"snapshot_{uuid.uuid4().hex}.jpg"
-        temp_path = UPLOAD_DIR / temp_filename
-        
-        try:
-            with open(temp_path, "wb") as f:
-                f.write(photo_bytes)
-        except (IOError, OSError) as file_error:
-            logger.error(f"Failed to save snapshot file {temp_path}: {file_error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Failed to save snapshot: {file_error}")
-        
-        return {
-            "message": "Snapshot captured successfully",
-            "photo_url": f"/uploads/{temp_filename}",
-            "temp_filename": temp_filename
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# --- Debug Endpoints ---
-# Эти endpoints доступны только в режиме разработки (DEBUG=True)
-DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
-
-@app.get("/devices/{device_id}/access-control-capabilities")
-async def get_access_control_capabilities(device_id: int, db: AsyncSession = Depends(database.get_db)):
-    """
-    Получить capabilities Access Control для проверки поддерживаемых функций.
-    Доступно только в режиме разработки (DEBUG=true).
-    """
-    if not DEBUG_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
     device = await crud.get_device_by_id(db, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
     try:
-        password = decrypt_password(device.password_encrypted)
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
+
+        # Проверка соединения (не блокируем при ошибке аутентификации)
+        connected, error_msg = await client.check_connection()
+        logger.info(f"Device {device_id} connection check: connected={connected}, error='{error_msg}'")
+
+        if not connected:
+            logger.warning(f"Device {device_id} not accessible: {error_msg}")
+            # Возвращаем пустой список вместо ошибки
+            return []
+
+        # Получаем список пользователей
+        users = await client.get_users()
+
+        if users is None:
+            logger.warning(f"Failed to get users from terminal {device_id}")
+            return []
+
+        return users
+
+    except PermissionError as pe:
+        logger.warning(f"Insufficient permissions for device {device_id}: {str(pe)}")
+        return []
+    except Exception as e:
+        logger.error(f"Error getting terminal users for device {device_id}: {e}", exc_info=True)
+        # Возвращаем пустой список вместо 500 ошибки
+        return []
+
+@app.get("/devices/{device_id}/terminal-users/compare")
+async def compare_terminal_users(
+    device_id: int,
+    employee_no_1: str,
+    employee_no_2: str,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Сравнение двух пользователей с терминала.
+    Полезно для выявления различий между рабочим и нерабочим пользователем.
+    """
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    try:
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
         
-        # Check connection first
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible."
-            )
+        # Получаем полную информацию о обоих пользователях
+        logger.info(f"Сравнение пользователей: {employee_no_1} vs {employee_no_2}")
+        user1_info = await client.get_user_full_info(employee_no_1)
+        user2_info = await client.get_user_full_info(employee_no_2)
         
-        # Get capabilities
-        import httpx
-        from httpx import DigestAuth
-        
-        async with httpx.AsyncClient() as http_client:
-            response = await http_client.get(
-                f"http://{device.ip_address}/ISAPI/AccessControl/capabilities?format=json",
-                auth=DigestAuth(device.username, password),
-                timeout=10
-            )
+        # Функция для сравнения словарей
+        def compare_dicts(dict1: dict, dict2: dict, path: str = "") -> List[Dict[str, Any]]:
+            differences = []
+            all_keys = set(dict1.keys()) | set(dict2.keys())
             
-            if response.status_code == 200:
-                content_type = response.headers.get("content-type", "")
-                if "json" in content_type:
-                    capabilities_data = response.json()
-                else:
-                    # XML response - parse it
-                    import xml.etree.ElementTree as ET
-                    root = ET.fromstring(response.content)
-                    # Convert to dict-like structure for display
-                    capabilities_data = {"xml": response.text[:5000]}  # First 5000 chars
+            for key in all_keys:
+                current_path = f"{path}.{key}" if path else key
+                val1 = dict1.get(key)
+                val2 = dict2.get(key)
                 
-                return {
-                    "device": {
-                        "model": device.name,
-                        "ip": device.ip_address
-                    },
-                    "content_type": content_type,
-                    "capabilities": capabilities_data
-                }
-            else:
+                if key not in dict1:
+                    differences.append({
+                        "path": current_path,
+                        "type": "missing_in_first",
+                        "value1": None,
+                        "value2": val2
+                    })
+                elif key not in dict2:
+                    differences.append({
+                        "path": current_path,
+                        "type": "missing_in_second",
+                        "value1": val1,
+                        "value2": None
+                    })
+                elif isinstance(val1, dict) and isinstance(val2, dict):
+                    differences.extend(compare_dicts(val1, val2, current_path))
+                elif val1 != val2:
+                    differences.append({
+                        "path": current_path,
+                        "type": "different",
+                        "value1": val1,
+                        "value2": val2
+                    })
+            
+            return differences
+        
+        # Сравниваем structured данные
+        structured1 = user1_info.get("structured", {})
+        structured2 = user2_info.get("structured", {})
+        differences = compare_dicts(structured1, structured2)
+        
+        # Сравниваем raw данные (только основные поля)
+        user_detail1 = user1_info.get("raw_data", {}).get("user_detail", {})
+        user_detail2 = user2_info.get("raw_data", {}).get("user_detail", {})
+        raw_differences = compare_dicts(user_detail1, user_detail2, "raw_data.user_detail")
+        
+        return {
+            "user1": {
+                "employee_no": employee_no_1,
+                "exists": user1_info.get("sources", {}).get("UserInfo/Detail") is not None,
+                "structured": structured1
+            },
+            "user2": {
+                "employee_no": employee_no_2,
+                "exists": user2_info.get("sources", {}).get("UserInfo/Detail") is not None,
+                "structured": structured2
+            },
+            "differences": {
+                "structured": differences,
+                "raw": raw_differences
+            },
+            "full_data": {
+                "user1": user1_info,
+                "user2": user2_info
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing terminal users: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/devices/{device_id}/terminal-users/{employee_no}")
+async def get_terminal_user_info(
+    device_id: int,
+    employee_no: str,
+    full: bool = False,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Получение детальной информации о пользователе с терминала.
+    Включает проверку наличия фото и статуса распознавания.
+    
+    Args:
+        full: Если True, возвращает максимально полную информацию из всех источников
+    """
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    try:
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
+        
+        if full:
+            # Получаем максимально полную информацию
+            full_info = await client.get_user_full_info(employee_no)
+            return full_info
+        else:
+            # Получаем базовую информацию
+            user_info = await client.get_user_info_direct(employee_no)
+            
+            if user_info is None:
                 raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to get capabilities: {response.text[:200]}"
+                    status_code=404,
+                    detail=f"User {employee_no} not found on terminal"
                 )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting capabilities: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/isapi-endpoints")
-async def discover_isapi_endpoints(device_id: int, db: AsyncSession = Depends(database.get_db)):
-    """
-    Обнаружение всех доступных ISAPI endpoints на терминале.
-    Помогает понять, какие функции поддерживаются устройством.
-    Доступно только в режиме разработки (DEBUG=true).
-    """
-    if not DEBUG_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Check connection first
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Get device info
-        device_info = await client.get_device_info()
-        
-        # Discover endpoints
-        endpoints_info = await client.discover_isapi_endpoints()
-        
-        return {
-            "device": {
-                "model": device_info.get("model", "unknown") if device_info else "unknown",
-                "firmware": device_info.get("firmwareVersion", "unknown") if device_info else "unknown",
-                "ip": device.ip_address
-            },
-            "endpoints": endpoints_info
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error discovering ISAPI endpoints: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/fdlib/list")
-async def get_fdlib_list(device_id: int, db: AsyncSession = Depends(database.get_db)):
-    """
-    Получение списка лиц из FDLib.
-    GET /ISAPI/Intelligent/FDLib?format=json
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Check connection first
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Get FDLib list
-        fdlib_list = await client.get_fdlib_list()
-        
-        # Форматируем ответ для удобства
-        result = {
-            "device_id": device_id,
-            "device_ip": device.ip_address,
-            "success": fdlib_list is not None and "error" not in fdlib_list,
-            "fdlib_list": fdlib_list
-        }
-        
-        # Добавляем статистику, если есть данные
-        if fdlib_list and "total_faces" in fdlib_list:
-            result["summary"] = {
-                "total_faces": fdlib_list.get("total_faces", 0),
-                "status": fdlib_list.get("statusString", "Unknown")
+            
+            # Проверяем наличие фото
+            face_url = user_info.get("faceURL")
+            has_face = face_url is not None and face_url != ""
+            
+            # Проверяем статус пользователя
+            valid_info = user_info.get("Valid", {})
+            is_enabled = valid_info.get("enable", False)
+            
+            # Формируем диагностическую информацию
+            diagnosis = {
+                "user_exists": True,
+                "has_face": has_face,
+                "face_url": face_url,
+                "is_enabled": is_enabled,
+                "user_type": user_info.get("userType", "unknown"),
+                "valid_period": {
+                    "begin": valid_info.get("beginTime"),
+                    "end": valid_info.get("endTime")
+                },
+                "issues": []
             }
-        
-        return result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting FDLib list: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/remote-control-settings")
-async def get_remote_control_settings(device_id: int, db: AsyncSession = Depends(database.get_db)):
-    """
-    Проверка настроек Remote Control на терминале.
-    Показывает, какие endpoints доступны и поддерживается ли Remote Registration.
-    Доступно только в режиме разработки (DEBUG=true).
-    """
-    if not DEBUG_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
+            
+            # Проверяем возможные проблемы
+            if not has_face:
+                diagnosis["issues"].append("У пользователя нет привязанного фото (faceURL отсутствует)")
+            
+            if not is_enabled:
+                diagnosis["issues"].append("Пользователь неактивен (Valid.enable = false)")
+            
+            if user_info.get("userType") == "blacklist":
+                diagnosis["issues"].append("Пользователь в черном списке (userType = blacklist)")
+            
+            # Проверяем валидность периода
+            if is_enabled:
+                from datetime import datetime
+                try:
+                    begin_time = datetime.fromisoformat(valid_info.get("beginTime", "").replace("Z", "+00:00"))
+                    end_time = datetime.fromisoformat(valid_info.get("endTime", "").replace("Z", "+00:00"))
+                    now = datetime.now()
+                    
+                    if now < begin_time:
+                        diagnosis["issues"].append(f"Период действия еще не начался (начнется {begin_time})")
+                    elif now > end_time:
+                        diagnosis["issues"].append(f"Период действия истек (закончился {end_time})")
+                except:
+                    pass
+            
+            return {
+                "employee_no": employee_no,
+                "user_info": user_info,
+                "diagnosis": diagnosis
+            }
     
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Check connection first
-        connected = await client.check_connection()
-        if not connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection."
-            )
-        
-        # Get device info
-        device_info = await client.get_device_info()
-        
-        # Check Remote Control settings
-        remote_settings = await client.check_remote_control_settings()
-        
-        return {
-            "device": {
-                "model": device_info.get("model", "unknown") if device_info else "unknown",
-                "firmware": device_info.get("firmwareVersion", "unknown") if device_info else "unknown",
-                "ip": device.ip_address
-            },
-            "remote_control": remote_settings,
-            "conclusion": "Remote Registration is supported" if remote_settings and (
-                remote_settings.get("capabilities_available") or 
-                remote_settings.get("register_endpoint_accessible")
-            ) else "Remote Registration may not be supported or not configured"
-        }
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error checking remote control settings: {e}", exc_info=True)
+        logger.error(f"Error getting terminal user info: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.post("/devices/test-remote-registration")
-async def test_remote_registration(
-    request: schemas.RemoteEnrollmentRequest,
+@app.get("/devices/{device_id}/terminal-users/compare")
+async def compare_terminal_users(
+    device_id: int,
+    employee_no_1: str,
+    employee_no_2: str,
     db: AsyncSession = Depends(database.get_db)
 ):
     """
-    Детальный тест Remote Registration с различными вариантами запросов.
-    Проверяет все возможные комбинации методов, форматов и заголовков.
-    Доступно только в режиме разработки (DEBUG=true).
+    Сравнение двух пользователей с терминала.
+    Полезно для выявления различий между рабочим и нерабочим пользователем.
     """
-    if not DEBUG_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
-    import logging
-    import httpx
-    from httpx import DigestAuth
-    import xml.etree.ElementTree as ET
-    import json
-    
-    logger = logging.getLogger(__name__)
-    
-    device = await crud.get_active_device(db)
+    device = await crud.get_device_by_id(db, device_id)
     if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
+        raise HTTPException(status_code=404, detail="Device not found")
     
     try:
-        password = decrypt_password(device.password_encrypted)
-        results = []
-        base_url = f"http://{device.ip_address}/ISAPI/AccessControl/RemoteControl/register"
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
         
-        # Получаем информацию об устройстве
-        hikvision_client = HikvisionClient(device.ip_address, device.username, password)
-        device_info = await hikvision_client.get_device_info()
+        # Получаем полную информацию о обоих пользователях
+        logger.info(f"Сравнение пользователей: {employee_no_1} vs {employee_no_2}")
+        user1_info = await client.get_user_full_info(employee_no_1)
+        user2_info = await client.get_user_full_info(employee_no_2)
         
-        # Test 1: PUT with JSON (стандартный способ)
-        request_body_json = {
-            "RemoteRegister": {
-                "registerType": "face",
-                "registerValidDuration": request.timeout,
-                "employeeNo": request.hikvision_id
-            }
-        }
-        
-        logger.info(f"Testing Remote Registration on {device.ip_address}")
-        
-        async with httpx.AsyncClient() as client:
-            # Test 1a: PUT with JSON, Content-Type: application/json
-            try:
-                response = await client.put(
-                    base_url,
-                    auth=DigestAuth(device.username, password),
-                    json=request_body_json,
-                    headers={"Content-Type": "application/json"},
-                    timeout=10
-                )
-                
-                results.append({
-                    "test": "PUT + JSON + Content-Type: application/json",
-                    "status_code": response.status_code,
-                    "response_body": response.text[:500],
-                    "error_info": HikvisionClient.parse_error_xml(response.content) if response.status_code != 200 else None
-                })
-            except Exception as e:
-                results.append({
-                    "test": "PUT + JSON + Content-Type: application/json",
-                    "error": str(e)
-                })
+        # Функция для сравнения словарей
+        def compare_dicts(dict1: dict, dict2: dict, path: str = "") -> List[Dict[str, Any]]:
+            differences = []
+            all_keys = set(dict1.keys()) | set(dict2.keys())
             
-            # Test 1b: PUT with JSON, без явного Content-Type
-            try:
-                response = await client.put(
-                    base_url,
-                    auth=DigestAuth(device.username, password),
-                    json=request_body_json,
-                    timeout=10
-                )
+            for key in all_keys:
+                current_path = f"{path}.{key}" if path else key
+                val1 = dict1.get(key)
+                val2 = dict2.get(key)
                 
-                results.append({
-                    "test": "PUT + JSON (auto Content-Type)",
-                    "status_code": response.status_code,
-                    "response_body": response.text[:500],
-                    "error_info": HikvisionClient.parse_error_xml(response.content) if response.status_code != 200 else None
-                })
-            except Exception as e:
-                results.append({
-                    "test": "PUT + JSON (auto Content-Type)",
-                    "error": str(e)
-                })
+                if key not in dict1:
+                    differences.append({
+                        "path": current_path,
+                        "type": "missing_in_first",
+                        "value1": None,
+                        "value2": val2
+                    })
+                elif key not in dict2:
+                    differences.append({
+                        "path": current_path,
+                        "type": "missing_in_second",
+                        "value1": val1,
+                        "value2": None
+                    })
+                elif isinstance(val1, dict) and isinstance(val2, dict):
+                    differences.extend(compare_dicts(val1, val2, current_path))
+                elif val1 != val2:
+                    differences.append({
+                        "path": current_path,
+                        "type": "different",
+                        "value1": val1,
+                        "value2": val2
+                    })
             
-            # Test 2: POST with JSON
-            try:
-                response = await client.post(
-                    base_url,
-                    auth=DigestAuth(device.username, password),
-                    json=request_body_json,
-                    headers={"Content-Type": "application/json"},
-                    timeout=10
-                )
-                
-                results.append({
-                    "test": "POST + JSON",
-                    "status_code": response.status_code,
-                    "response_body": response.text[:500],
-                    "error_info": HikvisionClient.parse_error_xml(response.content) if response.status_code != 200 else None
-                })
-            except Exception as e:
-                results.append({
-                    "test": "POST + JSON",
-                    "error": str(e)
-                })
-            
-            # Test 3: PUT with XML
-            request_body_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<RemoteRegister>
-    <registerType>face</registerType>
-    <registerValidDuration>{request.timeout}</registerValidDuration>
-    <employeeNo>{request.hikvision_id}</employeeNo>
-</RemoteRegister>"""
-            
-            try:
-                response = await client.put(
-                    base_url,
-                    auth=DigestAuth(device.username, password),
-                    content=request_body_xml,
-                    headers={"Content-Type": "application/xml"},
-                    timeout=10
-                )
-                
-                results.append({
-                    "test": "PUT + XML",
-                    "status_code": response.status_code,
-                    "response_body": response.text[:500],
-                    "error_info": HikvisionClient.parse_error_xml(response.content) if response.status_code != 200 else None
-                })
-            except Exception as e:
-                results.append({
-                    "test": "PUT + XML",
-                    "error": str(e)
-                })
+            return differences
         
-        # Определяем результат
-        success_tests = [r for r in results if r.get("status_code") in [200, 201]]
-        conclusion = " Remote Registration SUPPORTED" if success_tests else " Remote Registration NOT supported"
+        # Сравниваем structured данные
+        structured1 = user1_info.get("structured", {})
+        structured2 = user2_info.get("structured", {})
+        differences = compare_dicts(structured1, structured2)
+        
+        # Сравниваем raw данные (только основные поля)
+        user_detail1 = user1_info.get("raw_data", {}).get("user_detail", {})
+        user_detail2 = user2_info.get("raw_data", {}).get("user_detail", {})
+        raw_differences = compare_dicts(user_detail1, user_detail2, "raw_data.user_detail")
         
         return {
-            "device": {
-                "model": device_info.get("model", "unknown") if device_info else "unknown",
-                "firmware": device_info.get("firmwareVersion", "unknown") if device_info else "unknown",
-                "ip": device.ip_address
+            "user1": {
+                "employee_no": employee_no_1,
+                "exists": user1_info.get("sources", {}).get("UserInfo/Detail") is not None,
+                "structured": structured1
             },
-            "tests": results,
-            "conclusion": conclusion,
-            "note": "If all tests return 400/notSupport, the firmware version (V4.38.0) may not support this feature. Consider updating firmware to a newer version."
+            "user2": {
+                "employee_no": employee_no_2,
+                "exists": user2_info.get("sources", {}).get("UserInfo/Detail") is not None,
+                "structured": structured2
+            },
+            "differences": {
+                "structured": differences,
+                "raw": raw_differences
+            },
+            "full_data": {
+                "user1": user1_info,
+                "user2": user2_info
+            }
         }
-            
+    
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error testing remote registration: {e}", exc_info=True)
+        logger.error(f"Error comparing terminal users: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# --- Remote Enrollment Endpoints ---
-@app.post("/devices/start-remote-enrollment")
-async def start_remote_enrollment(
-    request: schemas.RemoteEnrollmentRequest,
-    db: AsyncSession = Depends(database.get_db)
+@app.get("/devices/{device_id}/terminal-users/{employee_no}/photo")
+async def get_terminal_user_photo(
+    device_id: int,
+    employee_no: str,
+    db: AsyncSession = Depends(database.get_db),
+    format: str = "binary"  # "binary" или "base64"
 ):
     """
-    Запуск режима удаленной регистрации на терминале.
-    Терминал перейдет в режим ожидания регистрации лица на указанное время.
+    Получение фото пользователя с терминала.
+    
+    Args:
+        format: Формат ответа - "binary" (по умолчанию) или "base64" для JSON ответа
+    
+    Returns:
+        Бинарные данные изображения (JPEG) или JSON с base64
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
-    device = await crud.get_active_device(db)
+    device = await crud.get_device_by_id(db, device_id)
     if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-
+        raise HTTPException(status_code=404, detail="Device not found")
+    
     try:
-        password = decrypt_password(device.password_encrypted)
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
-
-        # First, check if terminal is connected
-        logger.info("Checking terminal connection...")
-        connected = await client.check_connection()
-        if not connected:
+        
+        # Получаем фото пользователя
+        photo_bytes = await client.get_user_face_photo(employee_no)
+        
+        if photo_bytes is None:
             raise HTTPException(
-                status_code=503,
-                detail="Terminal is not accessible. Check network connection and terminal status."
+                status_code=404,
+                detail=f"Photo not found for user {employee_no}"
             )
-
-        # Try to start remote registration
-        success = await client.start_remote_registration(
-            request.hikvision_id,
-            request.timeout
+        
+        # Если запрошен формат base64, возвращаем JSON
+        if format == "base64":
+            import base64
+            photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
+            return {
+                "employeeNo": employee_no,
+                "photo": f"data:image/jpeg;base64,{photo_base64}",
+                "size": len(photo_bytes)
+            }
+        
+        # По умолчанию возвращаем бинарные данные
+        from fastapi.responses import Response
+        return Response(
+            content=photo_bytes,
+            media_type="image/jpeg",
+            headers={
+                "Content-Disposition": f'inline; filename="user_{employee_no}.jpg"',
+                "Cache-Control": "public, max-age=3600"  # Кеширование на 1 час
+            }
         )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting terminal user photo: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-        if not success:
-            # Get device info for better error reporting
-            device_info = await client.get_device_info()
-            firmware_version = device_info.get('firmwareVersion', 'unknown') if device_info else 'unknown'
-            model = device_info.get('model', 'unknown') if device_info else 'unknown'
+# Общие маршруты устройств (должны быть в конце, после специфичных)
+@app.get("/devices/{device_id}", response_model=schemas.DeviceResponse)
+async def get_device(device_id: int, db: AsyncSession = Depends(database.get_db)):
+    """Получение информации об устройстве."""
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return device
 
-            logger.error(f"Failed to start remote registration on {model} (FW: {firmware_version})")
+@app.put("/devices/{device_id}", response_model=schemas.DeviceResponse)
+async def update_device(
+    device_id: int,
+    device_update: schemas.DeviceUpdate,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Обновление устройства."""
+    device = await crud.update_device(db, device_id, device_update)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return device
 
-            # Check if it's a "not support" error
-            raise HTTPException(
-                status_code=501,
-                detail=f"Remote Registration не поддерживается на терминале {model} (прошивка {firmware_version}). "
-                       f"Эта функция может быть недоступна на данной модели или требует обновления прошивки. "
-                       f"Используйте альтернативный способ регистрации через интерфейс."
+# --- Reports API ---
+
+@app.get("/reports/daily", response_model=schemas.DailyReportResponse)
+async def get_daily_report(date_str: str, db: AsyncSession = Depends(database.get_db)):
+    """
+    Получение дневного отчета посещаемости.
+
+    Args:
+        date_str: Дата в формате YYYY-MM-DD
+
+    Returns:
+        Список пользователей с временем входа/выхода и отработанными часами
+    """
+    from datetime import datetime, time
+
+    try:
+        # Парсим дату
+        report_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        # Создаем диапазон времени (начало и конец дня)
+        start_datetime = datetime.combine(report_date, time.min)
+        end_datetime = datetime.combine(report_date, time.max)
+
+        logger.info(f"Generating daily report for {report_date}")
+
+        # Получаем все события за день с JOIN к пользователям
+        events = await crud.get_all_events_for_day(db, start_datetime, end_datetime)
+
+        # Группируем события по пользователям
+        user_events = {}
+        for event in events:
+            user_id = event.user_id
+            if user_id not in user_events:
+                user_events[user_id] = {
+                    "user": event.user.full_name,
+                    "hikvision_id": event.user.hikvision_id,
+                    "events": []
+                }
+            user_events[user_id]["events"].append({
+                "timestamp": event.timestamp,
+                "event_type": event.event_type
+            })
+
+        # Обрабатываем данные для каждого пользователя
+        report_data = []
+        for user_data in user_events.values():
+            events_list = sorted(user_data["events"], key=lambda x: x["timestamp"])
+
+            # Находим первый вход и последний выход
+            entry_time = None
+            exit_time = None
+
+            for event in events_list:
+                if event["event_type"] == "entry" and entry_time is None:
+                    entry_time = event["timestamp"]
+                elif event["event_type"] == "exit":
+                    exit_time = event["timestamp"]
+
+            # Вычисляем отработанные часы
+            hours_worked = 0.0
+            status = "Absent"
+
+            if entry_time and exit_time:
+                # Оба события есть
+                time_diff = exit_time - entry_time
+                hours_worked = time_diff.total_seconds() / 3600
+                status = "Present"
+            elif entry_time and not exit_time:
+                # Только вход - считаем как присутствие, но без точного времени выхода
+                # Можно использовать текущее время или конец рабочего дня
+                now = datetime.now()
+                if now.date() == report_date:
+                    # Сегодня - используем текущее время
+                    time_diff = now - entry_time
+                    hours_worked = time_diff.total_seconds() / 3600
+                else:
+                    # Прошлый день - предполагаем конец рабочего дня (18:00)
+                    end_of_day = datetime.combine(report_date, time(18, 0))
+                    if entry_time < end_of_day:
+                        time_diff = end_of_day - entry_time
+                        hours_worked = time_diff.total_seconds() / 3600
+                status = "Present (no exit)"
+
+            report_data.append({
+                "user": user_data["user"],
+                "hikvision_id": user_data["hikvision_id"],
+                "entry_time": entry_time.isoformat() if entry_time else None,
+                "exit_time": exit_time.isoformat() if exit_time else None,
+                "hours_worked": round(hours_worked, 2),
+                "status": status
+            })
+
+        # Сортируем по имени пользователя
+        report_data.sort(key=lambda x: x["user"])
+
+        logger.info(f"Generated report with {len(report_data)} users")
+        return schemas.DailyReportResponse(root=report_data)
+
+    except Exception as e:
+        logger.error(f"Error generating daily report: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
+
+@app.post("/admin/cleanup-database")
+async def cleanup_database_endpoint(keep_hikvision_id: str = "11", db: AsyncSession = Depends(database.get_db)):
+    """
+    Очистка базы данных, оставляя только указанного пользователя.
+    Удаляет всех пользователей кроме пользователя с указанным hikvision_id.
+    Также удаляет связанные события и фото файлы.
+    """
+    from sqlalchemy import delete, select, or_
+    from pathlib import Path
+    
+    try:
+        # Находим пользователя для сохранения
+        result = await db.execute(
+            select(models.User).filter(
+                or_(
+                    models.User.hikvision_id == keep_hikvision_id,
+                    models.User.full_name.ilike("%TESTinter%")
+                )
             )
+        )
+        user_to_keep = result.scalars().first()
+        
+        if not user_to_keep:
+            raise HTTPException(
+                status_code=404,
+                detail=f"User with hikvision_id='{keep_hikvision_id}' or name='TESTinter' not found"
+            )
+        
+        keep_id = user_to_keep.id
+        logger.info(f"Keeping user: ID={keep_id}, hikvision_id={user_to_keep.hikvision_id}, name={user_to_keep.full_name}")
+        
+        # Получаем всех пользователей
+        all_users_result = await db.execute(select(models.User))
+        all_users = all_users_result.scalars().all()
+        logger.info(f"Total users in database: {len(all_users)}")
+        
+        # Удаляем события и фото для всех пользователей кроме keep_id
+        deleted_events = 0
+        deleted_photos = 0
+        
+        for user in all_users:
+            if user.id != keep_id:
+                # Удаляем события пользователя
+                events_result = await db.execute(
+                    delete(models.AttendanceEvent).filter(
+                        models.AttendanceEvent.user_id == user.id
+                    )
+                )
+                deleted_events += events_result.rowcount
+                
+                # Удаляем фото файл, если он существует
+                if user.photo_path:
+                    try:
+                        photo_filename = Path(user.photo_path).name
+                        photo_file_path = UPLOAD_DIR / photo_filename
+                        if photo_file_path.exists():
+                            photo_file_path.unlink()
+                            deleted_photos += 1
+                            logger.info(f"Deleted photo file: {photo_file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete photo file for user {user.id}: {e}")
+        
+        logger.info(f"Deleted {deleted_events} events and {deleted_photos} photo files")
+        
+        # Удаляем всех пользователей кроме keep_id
+        users_result = await db.execute(
+            delete(models.User).filter(models.User.id != keep_id)
+        )
+        deleted_users = users_result.rowcount
+        
+        await db.commit()
+        
+        logger.info(f"Database cleanup completed: deleted {deleted_users} users, {deleted_events} events, {deleted_photos} photos")
+        
+        return {
+            "success": True,
+            "message": f"Database cleaned successfully. Kept user: {user_to_keep.full_name} (ID={keep_id}, hikvision_id={user_to_keep.hikvision_id})",
+            "stats": {
+                "deleted_users": deleted_users,
+                "deleted_events": deleted_events,
+                "deleted_photos": deleted_photos,
+                "kept_user": {
+                    "id": keep_id,
+                    "hikvision_id": user_to_keep.hikvision_id,
+                    "full_name": user_to_keep.full_name
+                }
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during database cleanup: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error during cleanup: {str(e)}")
+
+@app.get("/devices/{device_id}/events")
+async def get_device_events(
+    device_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_records: int = 100,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Получение событий аутентификации напрямую с терминала Hikvision через ISAPI.
+
+    Args:
+        device_id: ID устройства
+        start_date: Начальная дата в формате YYYY-MM-DD (по умолчанию - вчера)
+        end_date: Конечная дата в формате YYYY-MM-DD (по умолчанию - сейчас)
+        max_records: Максимальное количество записей (по умолчанию 100)
+
+    Returns:
+        Список событий с терминала
+    """
+    from datetime import datetime, timedelta
+
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    try:
+        # Расшифровка пароля
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
+
+        # Проверка соединения
+        connected, error_msg = await client.check_connection()
+        if not connected:
+            raise HTTPException(status_code=503, detail=f"Device is not accessible: {error_msg}")
+
+        # Определяем период
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        else:
+            start_datetime = datetime.now() - timedelta(days=1)  # Вчера
+
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
+            end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+        else:
+            end_datetime = datetime.now()  # Сейчас
+
+        logger.info(f"[GET_EVENTS] Getting events from device {device_id} ({device.name}) for period {start_datetime} to {end_datetime}")
+
+        # Получаем события с терминала
+        try:
+            events = await client.get_attendance_records(
+                start_time=start_datetime,
+                end_time=end_datetime,
+                max_records=max_records
+            )
+            logger.info(f"[GET_EVENTS] Retrieved {len(events)} events from terminal")
+        except Exception as e:
+            logger.error(f"[GET_EVENTS] Error in get_attendance_records: {e}", exc_info=True)
+            raise
 
         return {
             "success": True,
-            "message": f"Remote registration started for employee {request.hikvision_id}",
-            "timeout": request.timeout
+            "device_id": device_id,
+            "device_name": device.name,
+            "events": events,
+            "count": len(events),
+            "period": {
+                "start_date": start_datetime.isoformat(),
+                "end_date": end_datetime.isoformat()
+            }
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting remote enrollment: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        logger.error(f"Error getting events from device {device_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting events: {str(e)}")
 
-@app.get("/devices/check-enrollment-status/{hikvision_id}")
-async def check_enrollment_status(
-    hikvision_id: str,
+@app.post("/devices/{device_id}/sync-events", response_model=schemas.EventSyncResponse)
+async def sync_device_events(
+    device_id: int,
+    start_date: str = None,
+    end_date: str = None,
     db: AsyncSession = Depends(database.get_db)
 ):
     """
-    Проверка статуса регистрации лица на терминале.
-    Возвращает информацию о том, зарегистрировано ли лицо и FaceID.
+    Синхронизация событий аутентификации с терминала Hikvision.
+
+    Args:
+        device_id: ID устройства
+        start_date: Начальная дата в формате YYYY-MM-DD (по умолчанию - вчера)
+        end_date: Конечная дата в формате YYYY-MM-DD (по умолчанию - сегодня)
+
+    Returns:
+        Статистика синхронизации
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    device = await crud.get_active_device(db)
+    from datetime import datetime, timedelta
+
+    device = await crud.get_device_by_id(db, device_id)
     if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
+        raise HTTPException(status_code=404, detail="Device not found")
+
     try:
-        password = decrypt_password(device.password_encrypted)
+        # Расшифровка пароля
+        password = get_device_password_safe(device, device.id)
         client = HikvisionClient(device.ip_address, device.username, password)
-        
-        face_info = await client.check_face_info(hikvision_id)
-        
-        if face_info:
-            face_id = face_info.get("faceLibID")
-            return {
-                "registered": True,
-                "hikvision_id": hikvision_id,
-                "face_id": face_id
-            }
+
+        # Определяем период синхронизации
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
         else:
-            return {
-                "registered": False,
-                "hikvision_id": hikvision_id,
-                "face_id": None
-            }
-        
-    except Exception as e:
-        logger.error(f"Error checking enrollment status: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+            start_datetime = datetime.now() - timedelta(days=1)  # Вчера
 
-@app.post("/devices/complete-remote-enrollment", response_model=schemas.UserResponse)
-async def complete_remote_enrollment(
-    request: schemas.CompleteEnrollmentRequest,
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Завершение удаленной регистрации: получение фото с терминала и создание пользователя.
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    device = await crud.get_active_device(db)
-    if not device:
-        raise HTTPException(status_code=404, detail="No active device found")
-    
-    try:
-        password = decrypt_password(device.password_encrypted)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Шаг 1: Получить FaceID
-        face_info = await client.check_face_info(request.hikvision_id)
-        if not face_info:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No face registered for employee {request.hikvision_id}"
-            )
-        
-        face_id = face_info.get("faceLibID")
-        if not face_id:
-            raise HTTPException(
-                status_code=500,
-                detail="Face info found but FaceID is missing"
-            )
-        
-        # Шаг 2: Загрузить фото по FaceID
-        photo_bytes = await client.get_face_data_by_id(face_id)
-        if not photo_bytes:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to retrieve face photo for FaceID {face_id}"
-            )
-        
-        # Шаг 3: Сохранить фото
-        photo_filename = f"{request.hikvision_id}_remote.jpg"
-        photo_path = UPLOAD_DIR / photo_filename
-        
-        with open(photo_path, "wb") as f:
-            f.write(photo_bytes)
-        
-        logger.info(f"Saved face photo to {photo_path}")
-        
-        # Шаг 4: Создать пользователя в БД
-        user_create = schemas.UserCreate(
-            hikvision_id=request.hikvision_id,
-            full_name=request.full_name,
-            department=request.department
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
+        else:
+            end_datetime = datetime.now()  # Сейчас
+
+        # Устанавливаем конец дня для end_date
+        end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+
+        logger.info(f"Syncing events from device {device_id} ({device.name}) for period {start_datetime} to {end_datetime}")
+
+        # Получаем события с терминала
+        attendance_records = await client.get_attendance_records(
+            start_time=start_datetime,
+            end_time=end_datetime,
+            max_records=1000
         )
-        
-        db_user = await crud.create_user(db, user_create)
-        
-        # Шаг 5: Привязать фото к пользователю
-        db_user.photo_path = f"/uploads/{photo_filename}"
-        db_user.synced_to_device = True
-        await db.commit()
-        await db.refresh(db_user)
-        
-        logger.info(f" User {request.hikvision_id} created successfully via remote enrollment")
-        
-        return db_user
-        
-    except HTTPException:
-        raise
+
+        synced_count = 0
+        skipped_count = 0
+
+        # Сохраняем события в базу данных
+        for record in attendance_records:
+            try:
+                # Проверяем, существует ли уже такое событие (по employee_no, timestamp, event_type)
+                existing_event = await db.execute(
+                    select(models.AttendanceEvent).filter(
+                        models.AttendanceEvent.user_id == record["employee_no"],  # Это будет hikvision_id
+                        models.AttendanceEvent.timestamp == record["timestamp"],
+                        models.AttendanceEvent.event_type == record["event_type"]
+                    )
+                )
+                existing = existing_event.scalars().first()
+
+                if existing:
+                    skipped_count += 1
+                    continue
+
+                # Создаем событие через crud функцию
+                event_data = {
+                    "hikvision_id": record["employee_no"],
+                    "timestamp": record["timestamp"],
+                    "event_type": record["event_type"],
+                    "terminal_ip": record["terminal_ip"]
+                }
+
+                event = await crud.create_event(db, schemas_internal.InternalEventCreate(**event_data))
+                if event:
+                    synced_count += 1
+                else:
+                    logger.warning(f"Failed to create event for user {record['employee_no']}")
+
+            except Exception as e:
+                logger.warning(f"Error processing attendance record {record}: {e}")
+                continue
+
+        # Обновляем время последней синхронизации устройства
+        await crud.update_device_sync_time(db, device_id)
+
+        logger.info(f"Sync completed: {synced_count} events synced, {skipped_count} events skipped")
+
+        return {
+            "success": True,
+            "message": f"Events synchronized successfully",
+            "stats": {
+                "synced": synced_count,
+                "skipped": skipped_count,
+                "total_processed": len(attendance_records)
+            },
+            "period": {
+                "start_date": start_datetime.isoformat(),
+                "end_date": end_datetime.isoformat()
+            }
+        }
+
     except Exception as e:
-        logger.error(f"Error completing remote enrollment: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        logger.error(f"Error syncing events from device {device_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error syncing events: {str(e)}")

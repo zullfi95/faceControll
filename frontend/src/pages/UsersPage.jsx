@@ -9,105 +9,69 @@ const UsersPage = () => {
   const [newUser, setNewUser] = useState({ hikvision_id: '', full_name: '', department: '' });
   const [newUserPhoto, setNewUserPhoto] = useState(null);
   const [capturedPhotoUrl, setCapturedPhotoUrl] = useState(null);
-  const [tempPhotoFilename, setTempPhotoFilename] = useState(null);
   const [selectedPhoto, setSelectedPhoto] = useState(null);
   const [editingUser, setEditingUser] = useState(null);
   const [isCreating, setIsCreating] = useState(false);
-  const [isCapturing, setIsCapturing] = useState(false);
   const [creationStep, setCreationStep] = useState('');
-  const [showEnrollmentInstructions, setShowEnrollmentInstructions] = useState(false);
-  const [enrollmentInstructions, setEnrollmentInstructions] = useState([]);
-  const [enrollmentSuccess, setEnrollmentSuccess] = useState(false);
-  
-  // Remote enrollment states
-  const [showMethodSelection, setShowMethodSelection] = useState(false);
-  const [enrollmentMode, setEnrollmentMode] = useState(null); // 'device' | 'interface' | null
-  const [pollingInterval, setPollingInterval] = useState(null);
-  const [enrollmentTimeout, setEnrollmentTimeout] = useState(60);
-  const [timeLeft, setTimeLeft] = useState(60);
-  const [enrollmentError, setEnrollmentError] = useState(null);
-  const [isEnrolling, setIsEnrolling] = useState(false);
   
   // Face capture from terminal states
   const [isCapturingFromTerminal, setIsCapturingFromTerminal] = useState(false);
   const [captureStatus, setCaptureStatus] = useState(null); // 'waiting' | 'capturing' | 'success' | 'error'
   const [captureMessage, setCaptureMessage] = useState('');
 
-  // Получение пользователей
+  // Получение пользователей из БД
   const { data: users, isLoading } = useQuery({
     queryKey: ['users'],
     queryFn: async () => {
       const res = await axios.get('/api/users/');
       return res.data;
-    }
+    },
+    staleTime: Infinity, // Данные никогда не считаются устаревшими
+    gcTime: 24 * 60 * 60 * 1000, // 24 часа в кеше
   });
 
-  // Запуск регистрации лица на терминале
-  const handleStartEnrollment = async () => {
-    if (!newUser.hikvision_id || !newUser.full_name) {
-      alert('Заполните ID и ФИО перед регистрацией!');
-      return;
-    }
-    
-    setIsCapturing(true);
-    try {
-      const response = await axios.post('/api/devices/start-face-enrollment', newUser);
-      
-      if (response.data.success) {
-        setEnrollmentInstructions(response.data.instructions || []);
-        setShowEnrollmentInstructions(true);
-        setEnrollmentSuccess(false);
-      } else {
-        alert('Ошибка: ' + response.data.message);
-      }
-    } catch (error) {
-      alert('Ошибка запуска регистрации: ' + (error.response?.data?.detail || error.message));
-    } finally {
-      setIsCapturing(false);
-    }
-  };
-  
-  // Завершение регистрации после того как пользователь зарегистрировался
-  const handleCompleteEnrollment = async () => {
-    setIsCreating(true);
-    setCreationStep('Сохранение данных в систему...');
-    
-    try {
-      // Создаем пользователя в БД (если еще не создан)
-      const userCheck = await axios.get(`/api/users/`);
-      const existingUser = userCheck.data.find(u => u.hikvision_id === newUser.hikvision_id);
-      
-      let userId;
-      if (!existingUser) {
-        const userResponse = await axios.post('/api/users/', newUser);
-        userId = userResponse.data.id;
-      } else {
-        userId = existingUser.id;
-      }
-      
-      // Отмечаем как синхронизированного
-      await axios.post(`/api/users/${userId}/sync-to-device`).catch(() => {
-        // Игнорируем ошибку синхронизации, т.к. пользователь уже на терминале
-      });
-      
-      // Успех!
-      queryClient.invalidateQueries(['users']);
-      setIsModalOpen(false);
-      setShowEnrollmentInstructions(false);
-      setNewUser({ hikvision_id: '', full_name: '', department: '' });
-      setNewUserPhoto(null);
-      setCapturedPhotoUrl(null);
-      setTempPhotoFilename(null);
-      setCreationStep('');
-      alert('✅ Сотрудник успешно зарегистрирован!');
-      
-    } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
-      alert(`Ошибка: ${errorMsg}`);
-    } finally {
-      setIsCreating(false);
+  // Получение устройств
+  const { data: devices } = useQuery({
+    queryKey: ['devices'],
+    queryFn: async () => {
+      const res = await axios.get('/api/devices/');
+      return res.data;
+    },
+    staleTime: Infinity, // Данные никогда не считаются устаревшими
+    gcTime: 24 * 60 * 60 * 1000, // 24 часа в кеше
+  });
+
+  // Получение пользователей с терминала
+  // Сохраняем выбранное устройство в localStorage
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() => {
+    const saved = localStorage.getItem('selectedDeviceId');
+    return saved ? parseInt(saved) : null;
+  });
+
+  // Сохраняем выбранное устройство при изменении
+  const handleDeviceChange = (deviceId) => {
+    const id = deviceId ? parseInt(deviceId) : null;
+    setSelectedDeviceId(id);
+    if (id) {
+      localStorage.setItem('selectedDeviceId', id.toString());
+    } else {
+      localStorage.removeItem('selectedDeviceId');
     }
   };
+
+  const { data: terminalUsers, isLoading: isLoadingTerminal, refetch: refetchTerminal } = useQuery({
+    queryKey: ['terminal-users', selectedDeviceId],
+    queryFn: async () => {
+      if (!selectedDeviceId) return null;
+      const res = await axios.get(`/api/devices/${selectedDeviceId}/terminal-users`);
+      return res.data;
+    },
+    enabled: !!selectedDeviceId,
+    retry: false,
+    staleTime: Infinity, // Данные никогда не считаются устаревшими
+    gcTime: 24 * 60 * 60 * 1000, // 24 часа в кеше
+  });
+
 
   // Запуск режима захвата лица на терминале
   const handleStartFaceCapture = async () => {
@@ -179,6 +143,17 @@ const UsersPage = () => {
             size: file.size,
             type: file.type
           });
+        } else if (response.data.can_continue_without_preview) {
+          // Фото захвачено на терминале, но предпросмотр недоступен из-за ограничений прав
+          console.log('⚠️ [PHOTO] Предпросмотр недоступен, но фото захвачено на терминале');
+          setCaptureMessage('✅ Фото захвачено на терминале! (Предпросмотр недоступен из-за прав доступа, но регистрация возможна)');
+          
+          // Создаем фиктивный файл-заглушку чтобы активировать кнопку "Сохранить"
+          const placeholderBlob = new Blob([''], { type: 'image/jpeg' });
+          const placeholderFile = new File([placeholderBlob], `${newUser.hikvision_id}_terminal_captured.jpg`, { type: 'image/jpeg' });
+          setNewUserPhoto(placeholderFile);
+          
+          console.log('✅ [PHOTO] Установлен placeholder для активации формы');
         }
 
         // Фото уже захвачено и загружено на терминал
@@ -195,70 +170,6 @@ const UsersPage = () => {
     }
   };
   
-  // Polling для проверки статуса захвата лица
-  const startFaceCapturePolling = (deviceId) => {
-    let attempts = 0;
-    const maxAttempts = 30; // 60 секунд (30 попыток * 2 сек)
-    
-    const pollInterval = setInterval(async () => {
-      attempts++;
-      
-      try {
-        // Проверяем, зарегистрировано ли лицо
-        const statusRes = await axios.get(`/api/devices/check-enrollment-status/${newUser.hikvision_id}`);
-        
-        if (statusRes.data.registered) {
-          // Лицо зарегистрировано! Получаем фото
-          clearInterval(pollInterval);
-          await fetchFaceFromTerminal(deviceId);
-        } else if (attempts >= maxAttempts) {
-          clearInterval(pollInterval);
-          setCaptureStatus('error');
-          setCaptureMessage('Время ожидания истекло. Попробуйте снова.');
-          setIsCapturingFromTerminal(false);
-        }
-      } catch (error) {
-        console.error('Polling error:', error);
-        if (attempts >= maxAttempts) {
-          clearInterval(pollInterval);
-          setCaptureStatus('error');
-          setCaptureMessage('Ошибка проверки статуса');
-          setIsCapturingFromTerminal(false);
-        }
-      }
-    }, 2000); // Каждые 2 секунды
-  };
-  
-  // Получение фото лица с терминала
-  const fetchFaceFromTerminal = async (deviceId) => {
-    try {
-      setCaptureMessage('Получение фото с терминала...');
-      
-      // Получаем фото через UserFace/faceData
-      const faceDataRes = await axios.get(`/api/devices/${deviceId}/user-face-data`, {
-        params: { employee_no: newUser.hikvision_id },
-        responseType: 'blob'
-      });
-      
-      // Создаем файл из blob
-      const blob = faceDataRes.data;
-      const file = new File([blob], `${newUser.hikvision_id}_face.jpg`, { type: 'image/jpeg' });
-      setNewUserPhoto(file);
-      
-      // Создаем URL для предпросмотра
-      const imageUrl = URL.createObjectURL(blob);
-      setCapturedPhotoUrl(imageUrl);
-      
-      setCaptureStatus('success');
-      setCaptureMessage('✅ Фото успешно получено с терминала! Проверьте изображение и нажмите "Сохранить".');
-      setIsCapturingFromTerminal(false);
-      
-    } catch (error) {
-      setCaptureStatus('error');
-      setCaptureMessage('Ошибка получения фото: ' + (error.response?.data?.detail || error.message));
-      setIsCapturingFromTerminal(false);
-    }
-  };
 
   // Создание пользователя с автоматической синхронизацией
   const handleSubmit = async (e) => {
@@ -277,13 +188,20 @@ const UsersPage = () => {
       const userResponse = await axios.post('/api/users/', newUser);
       const userId = userResponse.data.id;
       
-      // Шаг 2: Загрузка фото
-      setCreationStep('Загрузка фото...');
-      const formData = new FormData();
-      formData.append('file', newUserPhoto);
-      await axios.post(`/api/users/${userId}/upload-photo`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      // Шаг 2: Загрузка фото (только если это НЕ placeholder)
+      const isPlaceholder = newUserPhoto.size === 0;
+      
+      if (!isPlaceholder) {
+        setCreationStep('Загрузка фото...');
+        const formData = new FormData();
+        formData.append('file', newUserPhoto);
+        await axios.post(`/api/users/${userId}/upload-photo`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' }
+        });
+      } else {
+        console.log('⏭️ [UPLOAD] Пропускаем загрузку фото - используется захваченное на терминале');
+        setCreationStep('Используется фото с терминала...');
+      }
       
       // Шаг 3: Синхронизация с устройством
       setCreationStep('Синхронизация с терминалом...');
@@ -295,8 +213,9 @@ const UsersPage = () => {
       setNewUser({ hikvision_id: '', full_name: '', department: '' });
       setNewUserPhoto(null);
       setCapturedPhotoUrl(null);
-      setTempPhotoFilename(null);
       setCreationStep('');
+      setCaptureStatus(null);
+      setCaptureMessage('');
       alert('Сотрудник успешно добавлен и синхронизирован с терминалом!');
       
     } catch (error) {
@@ -339,6 +258,24 @@ const UsersPage = () => {
     }
   });
 
+  // Удаление пользователя
+  const deleteMutation = useMutation({
+    mutationFn: (userId) => axios.delete(`/api/users/${userId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['users']);
+      alert('Пользователь успешно удален!');
+    },
+    onError: (error) => {
+      alert('Ошибка удаления: ' + (error.response?.data?.detail || error.message));
+    }
+  });
+
+  const handleDelete = (userId, userName) => {
+    if (window.confirm(`Вы уверены, что хотите удалить пользователя "${userName}"? Это действие нельзя отменить.`)) {
+      deleteMutation.mutate(userId);
+    }
+  };
+
   const handlePhotoUpload = (userId) => {
     if (!selectedPhoto) {
       alert('Выберите фото');
@@ -353,344 +290,184 @@ const UsersPage = () => {
     }
   };
 
-  // Remote enrollment functions
-  const handleSelectMethod = (method) => {
-    setShowMethodSelection(false);
-    
-    if (method === 'interface') {
-      // Открыть существующую форму регистрации с интерфейса
-      setEnrollmentMode(null); // Сбрасываем режим устройства
-      setIsModalOpen(true);
-    } else if (method === 'device') {
-      // Режим регистрации с устройства
-      setEnrollmentMode('device');
-      setIsModalOpen(false); // Закрываем модалку интерфейса, если была открыта
-    }
-  };
-
-  const handleStartRemoteEnrollment = async () => {
-    console.log('🚀 [START] handleStartRemoteEnrollment вызван');
-    console.log('📋 [DATA] newUser:', newUser);
-    
-    // Валидация
-    if (!newUser.hikvision_id || !newUser.full_name) {
-      console.warn('⚠️ [VALIDATION] Не заполнены ID или ФИО');
-      alert('Заполните ID и ФИО!');
-      return;
-    }
-
-    // Проверка дубликата
-    const existingUser = users?.find(u => u.hikvision_id === newUser.hikvision_id);
-    if (existingUser) {
-      console.warn('⚠️ [VALIDATION] Пользователь уже существует:', existingUser);
-      setEnrollmentError('Пользователь с таким ID уже зарегистрирован');
-      return;
-    }
-
-    console.log('✅ [VALIDATION] Валидация пройдена');
-    setIsEnrolling(true);
-    setEnrollmentError(null);
-
-    try {
-      // Получаем device_id (берем первый активный)
-      console.log('🔍 [DEVICE] Получение списка устройств...');
-      const devicesRes = await axios.get('/api/devices/');
-      const device = devicesRes.data.find(d => d.is_active) || devicesRes.data[0];
-      
-      if (!device) {
-        throw new Error('Устройство не найдено');
-      }
-      
-      console.log('✅ [DEVICE] Устройство найдено:', device.id, device.name);
-
-      // Используем правильный endpoint с CaptureFaceData
-      console.log('📤 [REQUEST] Отправка запроса на захват фото...');
-      const response = await axios.post(`/api/devices/${device.id}/start-face-capture`, {
-        employee_no: newUser.hikvision_id,
-        hikvision_id: newUser.hikvision_id,
-        full_name: newUser.full_name
-      });
-
-      console.log('📥 [RESPONSE] Ответ получен:', {
-        success: response.data.success,
-        photo_path: response.data.photo_path,
-        face_data_url: response.data.face_data_url,
-        capture_progress: response.data.capture_progress
-      });
-
-      if (response.data.success) {
-        // Проверяем, есть ли уже захваченное фото
-        if (response.data.photo_path) {
-          console.log('📸 [PHOTO] Фото уже захвачено, путь:', response.data.photo_path);
-          // Фото уже захвачено и скачано!
-          try {
-            // Получаем фото через API
-            console.log('📥 [DOWNLOAD] Скачивание фото с сервера...');
-            const photoResponse = await axios.get(`/api${response.data.photo_path}`, {
-              responseType: 'blob'
-            });
-
-            console.log('✅ [DOWNLOAD] Фото скачано, размер:', photoResponse.data.size, 'bytes');
-            const photoUrl = URL.createObjectURL(photoResponse.data);
-            setCapturedPhotoUrl(photoUrl);
-            console.log('🖼️ [DISPLAY] capturedPhotoUrl установлен:', photoUrl);
-            
-            // Создаем файл из blob для сохранения
-            const file = new File([photoResponse.data], `${newUser.hikvision_id}_face.jpg`, { type: 'image/jpeg' });
-            setNewUserPhoto(file);
-            
-            console.log('✅ [PHOTO] Фото установлено в newUserPhoto:', {
-              name: file.name,
-              size: file.size,
-              type: file.type
-            });
-            
-            // Останавливаем процесс регистрации и показываем фото в форме
-            setIsEnrolling(false);
-            setCreationStep('Фото успешно захвачено! Проверьте фото и нажмите "Сохранить"');
-            
-            console.log('✅ [STATE] Состояние обновлено: isEnrolling=false, форма должна показаться');
-            
-            // НЕ вызываем handleCompleteRemoteEnrollment автоматически
-            // Пользователь должен увидеть фото и нажать "Сохранить"
-          } catch (photoError) {
-            console.error('❌ [ERROR] Ошибка загрузки фото:', photoError);
-            setEnrollmentError('Фото захвачено, но не удалось загрузить. Попробуйте снова.');
-            setIsEnrolling(false);
-          }
-        } else if (response.data.face_data_url && response.data.capture_progress === "100") {
-          // Фото захвачено, но еще не скачано - скачиваем
-          setCreationStep('Скачивание фото с терминала...');
-          // Polling будет проверять статус и скачивать фото
-          setTimeLeft(enrollmentTimeout);
-          startPolling();
-        } else {
-          // Режим захвата запущен, но фото еще не захвачено - ждем
-          setTimeLeft(enrollmentTimeout);
-          startPolling();
-        }
-      } else {
-        setEnrollmentError('Не удалось запустить регистрацию на терминале');
-        setIsEnrolling(false);
-      }
-    } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
-      setEnrollmentError(errorMsg);
-      setIsEnrolling(false);
-    }
-  };
-
-  const startPolling = () => {
-    let countdown = enrollmentTimeout;
-    
-    // Таймер обратного отсчета
-    const countdownInterval = setInterval(() => {
-      countdown -= 1;
-      setTimeLeft(countdown);
-      
-      if (countdown <= 0) {
-        clearInterval(countdownInterval);
-        if (pollingInterval) {
-          clearInterval(pollingInterval);
-        }
-        setIsEnrolling(false);
-        setEnrollmentError('Время ожидания истекло. Попробуйте снова.');
-      }
-    }, 1000);
-
-    // Polling статуса регистрации
-    const pollInterval = setInterval(async () => {
-      try {
-        const response = await axios.get(`/api/devices/check-enrollment-status/${newUser.hikvision_id}`);
-        
-        if (response.data.registered) {
-          clearInterval(pollInterval);
-          clearInterval(countdownInterval);
-          await handleCompleteRemoteEnrollment();
-        }
-      } catch (error) {
-        console.error('Polling error:', error);
-      }
-    }, 2000); // Каждые 2 секунды
-
-    setPollingInterval(pollInterval);
-  };
-
-  const handleCompleteRemoteEnrollment = async () => {
-    setCreationStep('Завершение регистрации...');
-    
-    try {
-      setIsCreating(true);
-      
-      console.log('💾 Начало сохранения:', {
-        hikvision_id: newUser.hikvision_id,
-        full_name: newUser.full_name,
-        hasPhoto: !!newUserPhoto,
-        photoName: newUserPhoto?.name,
-        photoSize: newUserPhoto?.size
-      });
-      
-      // Шаг 1: Создание пользователя в БД
-      setCreationStep('Создание пользователя в системе...');
-      let userId;
-      const existingUser = users?.find(u => u.hikvision_id === newUser.hikvision_id);
-      
-      if (existingUser) {
-        userId = existingUser.id;
-        setCreationStep('Пользователь уже существует, обновление данных...');
-        console.log('📝 Пользователь уже существует, ID:', userId);
-      } else {
-        const userResponse = await axios.post('/api/users/', newUser);
-        userId = userResponse.data.id;
-        console.log('✅ Пользователь создан, ID:', userId);
-      }
-      
-      // Шаг 2: Загрузка фото (если есть)
-      if (newUserPhoto) {
-        setCreationStep('Загрузка фото...');
-        console.log('📤 Загрузка фото:', newUserPhoto.name, newUserPhoto.size, 'bytes');
-        const formData = new FormData();
-        formData.append('file', newUserPhoto);
-        await axios.post(`/api/users/${userId}/upload-photo`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-        console.log('✅ Фото загружено успешно');
-      } else {
-        console.warn('⚠️ Фото отсутствует! newUserPhoto:', newUserPhoto);
-        setEnrollmentError('Фото не найдено. Пожалуйста, захватите фото с терминала или загрузите файл.');
-        setIsCreating(false);
-        return;
-      }
-      
-      // Шаг 3: Синхронизация с устройством
-      setCreationStep('Синхронизация с терминалом...');
-      await axios.post(`/api/users/${userId}/sync-to-device`).catch((syncError) => {
-        console.warn('⚠️ Ошибка синхронизации (игнорируется):', syncError);
-        // Игнорируем ошибку синхронизации, т.к. пользователь уже на терминале
-      });
-
-      // Успех!
-      console.log('✅ Регистрация завершена успешно!');
-      queryClient.invalidateQueries(['users']);
-      setEnrollmentSuccess(true);
-      setIsEnrolling(false);
-      setIsCreating(false);
-      
-      // Автозакрытие через 2 секунды
-      setTimeout(() => {
-        handleCloseRemoteEnrollment();
-      }, 2000);
-      
-    } catch (error) {
-      console.error('❌ Ошибка при сохранении:', error);
-      const errorMsg = error.response?.data?.detail || error.message;
-      setEnrollmentError(`Ошибка завершения: ${errorMsg}`);
-      setIsEnrolling(false);
-      setIsCreating(false);
-    }
-  };
-
-  const handleCancelEnrollment = () => {
-    if (pollingInterval) {
-      clearInterval(pollingInterval);
-      setPollingInterval(null);
-    }
-    setIsEnrolling(false);
-    setEnrollmentError(null);
-    handleCloseRemoteEnrollment();
-  };
-
-  const handleRetryEnrollment = () => {
-    setEnrollmentError(null);
-    setTimeLeft(enrollmentTimeout);
-    handleStartRemoteEnrollment();
-  };
-
-  const handleCloseRemoteEnrollment = () => {
-    setEnrollmentMode(null);
-    setIsEnrolling(false);
-    setEnrollmentError(null);
-    setEnrollmentSuccess(false);
-    setNewUser({ hikvision_id: '', full_name: '', department: '' });
-    setTimeLeft(enrollmentTimeout);
-    setCreationStep('');
-    setCapturedPhotoUrl(null);
-    setNewUserPhoto(null);
-    if (pollingInterval) {
-      clearInterval(pollingInterval);
-      setPollingInterval(null);
-    }
-  };
-
-  // Cleanup polling on unmount
-  React.useEffect(() => {
-    return () => {
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
-      }
-    };
-  }, [pollingInterval]);
-
   if (isLoading) return <div className="p-8">Загрузка...</div>;
+
+  // Получаем активное устройство или первое доступное
+  const activeDevice = devices?.find(d => d.is_active) || devices?.[0];
 
   return (
     <div className="px-4 py-6 sm:px-0">
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">Сотрудники</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Сотрудники</h1>
         <button
-          onClick={() => setShowMethodSelection(true)}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700"
+          onClick={() => setIsModalOpen(true)}
+          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
         >
           Добавить сотрудника
         </button>
       </div>
 
+      {/* Список пользователей с терминала */}
+      {devices && devices.length > 0 && (
+        <div className="mb-6 bg-white shadow-card rounded-lg p-4 border border-gray-100">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 tracking-tight">Пользователи с терминала</h2>
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedDeviceId || ''}
+                onChange={(e) => {
+                  handleDeviceChange(e.target.value);
+                }}
+                className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">Выберите устройство</option>
+                {devices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name} ({device.ip_address})
+                  </option>
+                ))}
+              </select>
+              {selectedDeviceId && (
+                <button
+                  onClick={() => refetchTerminal()}
+                  disabled={isLoadingTerminal}
+                  className="bg-gray-100 text-gray-700 px-3 py-2 rounded-md hover:bg-gray-200 text-sm disabled:opacity-50 shadow-soft transition-shadow duration-200 font-medium"
+                >
+                  {isLoadingTerminal ? 'Загрузка...' : 'Обновить'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {selectedDeviceId ? (
+            isLoadingTerminal ? (
+              <div className="text-center py-8 text-gray-500">Загрузка пользователей с терминала...</div>
+            ) : terminalUsers ? (
+              terminalUsers.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          ID
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Имя
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Тип
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Статус фото
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Двери
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {terminalUsers.map((user, index) => {
+                        const hasPhoto = user.numOfFace > 0;
+                        
+                        return (
+                          <tr key={user.employeeNo || index} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                              {user.employeeNo || 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                              {user.name || 'Не указано'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                              {user.userType || 'normal'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                              {hasPhoto ? (
+                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                  {user.numOfFace} фото
+                                </span>
+                              ) : (
+                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                                  Нет фото
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                              {user.doorRight || 'N/A'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div className="mt-2 text-sm text-gray-500">
+                    Всего пользователей: {terminalUsers.length}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">На терминале нет пользователей</div>
+              )
+            ) : (
+              <div className="text-center py-8 text-red-500">Ошибка загрузки пользователей с терминала</div>
+            )
+          ) : (
+            <div className="text-center py-8 text-gray-400">Выберите устройство для просмотра пользователей</div>
+          )}
+        </div>
+      )}
+
       {/* Таблица */}
-      <div className="bg-white shadow overflow-hidden sm:rounded-md">
+      <div className="bg-white shadow-card overflow-hidden sm:rounded-lg border border-gray-100">
         <ul className="divide-y divide-gray-200">
           {users?.map((user) => (
-            <li key={user.id} className="px-4 py-4 sm:px-6 hover:bg-gray-50">
+            <li key={user.id} className="px-4 py-4 sm:px-6 hover:bg-gray-50 transition-colors duration-150">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-4">
                   {user.photo_path ? (
                     <img 
                       src={`/api${user.photo_path}`}
                       alt={user.full_name}
-                      className="h-12 w-12 rounded-full object-cover"
+                      className="h-12 w-12 rounded-full object-cover shadow-soft border-2 border-gray-100"
                     />
                   ) : (
-                    <div className="h-12 w-12 rounded-full bg-gray-200 flex items-center justify-center">
-                      <span className="text-gray-500 text-xs">Нет фото</span>
+                    <div className="h-12 w-12 rounded-full bg-gray-200 flex items-center justify-center shadow-soft border-2 border-gray-100">
+                      <span className="text-gray-500 text-xs font-medium">Нет фото</span>
                     </div>
                   )}
                   <div>
-                    <p className="text-sm font-medium text-indigo-600 truncate">{user.full_name}</p>
-                    <p className="flex items-center text-sm text-gray-500">
-                      ID: {user.hikvision_id} | Отдел: {user.department || 'Не указан'}
+                    <p className="text-sm font-semibold text-gray-900 truncate">{user.full_name}</p>
+                    <p className="flex items-center text-sm text-gray-500 mt-0.5">
+                      ID: <span className="font-medium text-gray-700 ml-1">{user.hikvision_id}</span> | Отдел: <span className="ml-1">{user.department || 'Не указан'}</span>
                     </p>
                   </div>
                 </div>
                 <div className="ml-2 flex items-center space-x-2">
-                  <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                  <span className={`px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full shadow-soft ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                     {user.is_active ? 'Активен' : 'Неактивен'}
                   </span>
                   {user.synced_to_device && (
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                    <span className="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 shadow-soft">
                       Синхронизирован
                     </span>
                   )}
                   <button
                     onClick={() => setEditingUser(user)}
-                    className="text-indigo-600 hover:text-indigo-900 text-sm"
+                    className="text-indigo-600 hover:text-indigo-900 text-sm font-medium px-2 py-1 rounded hover:bg-indigo-50 transition-colors duration-150"
                   >
                     Фото
                   </button>
                   <button
                     onClick={() => handleSync(user.id)}
                     disabled={!user.photo_path || syncMutation.isPending}
-                    className="text-green-600 hover:text-green-900 text-sm disabled:text-gray-400 disabled:cursor-not-allowed"
+                    className="text-green-600 hover:text-green-900 text-sm font-medium px-2 py-1 rounded hover:bg-green-50 transition-colors duration-150 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                   >
                     Синхронизировать
+                  </button>
+                  <button
+                    onClick={() => handleDelete(user.id, user.full_name)}
+                    disabled={deleteMutation.isPending}
+                    className="text-red-600 hover:text-red-900 text-sm font-medium px-2 py-1 rounded hover:bg-red-50 transition-colors duration-150 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  >
+                    {deleteMutation.isPending ? 'Удаление...' : 'Удалить'}
                   </button>
                 </div>
               </div>
@@ -699,309 +476,12 @@ const UsersPage = () => {
         </ul>
       </div>
 
-      {/* Модалка выбора способа регистрации */}
-      {showMethodSelection && (
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full p-6">
-            <h2 className="text-2xl font-bold mb-6 text-center">Выберите способ регистрации</h2>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Регистрация с устройства */}
-              <button
-                onClick={() => handleSelectMethod('device')}
-                className="p-6 border-2 border-gray-300 rounded-lg hover:border-indigo-500 hover:bg-indigo-50 transition-all group"
-              >
-                <div className="text-center">
-                  <div className="text-5xl mb-4">🖥️</div>
-                  <h3 className="text-lg font-semibold mb-2 group-hover:text-indigo-600">С устройства</h3>
-                  <p className="text-sm text-gray-600">
-                    Сотрудник регистрируется прямо на терминале. Фото получается автоматически.
-                  </p>
-                </div>
-              </button>
-
-              {/* Регистрация с интерфейса */}
-              <button
-                onClick={() => handleSelectMethod('interface')}
-                className="p-6 border-2 border-gray-300 rounded-lg hover:border-indigo-500 hover:bg-indigo-50 transition-all group"
-              >
-                <div className="text-center">
-                  <div className="text-5xl mb-4">📝</div>
-                  <h3 className="text-lg font-semibold mb-2 group-hover:text-indigo-600">С интерфейса</h3>
-                  <p className="text-sm text-gray-600">
-                    Ручной ввод данных и загрузка фото с компьютера.
-                  </p>
-                </div>
-              </button>
-            </div>
-
-            <div className="flex justify-end mt-6">
-              <button
-                onClick={() => setShowMethodSelection(false)}
-                className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
-              >
-                Отмена
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Модалка регистрации с устройства */}
-      {enrollmentMode === 'device' && (
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full p-6">
-            <h2 className="text-lg font-bold mb-4">Регистрация с устройства</h2>
-
-            {!isEnrolling && !enrollmentSuccess && !enrollmentError && !capturedPhotoUrl && (
-              <div>
-                {/* Форма ввода данных */}
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">ID сотрудника</label>
-                    <input
-                      type="text"
-                      required
-                      value={newUser.hikvision_id}
-                      onChange={(e) => setNewUser({...newUser, hikvision_id: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                      placeholder="Например: 1001"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">ФИО</label>
-                    <input
-                      type="text"
-                      required
-                      value={newUser.full_name}
-                      onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">Отдел (опционально)</label>
-                    <input
-                      type="text"
-                      value={newUser.department}
-                      onChange={(e) => setNewUser({...newUser, department: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex justify-end gap-2 mt-6">
-                  <button
-                    onClick={handleCloseRemoteEnrollment}
-                    className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
-                  >
-                    Отмена
-                  </button>
-                  <button
-                    onClick={handleStartRemoteEnrollment}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
-                  >
-                    Запустить регистрацию на терминале
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Показываем форму с фото после захвата */}
-            {!isEnrolling && !enrollmentSuccess && !enrollmentError && capturedPhotoUrl && (
-              <div>
-                <div className="mb-4">
-                  <p className="text-sm text-green-600 font-medium mb-2">✅ Фото успешно захвачено с терминала!</p>
-                  {creationStep && (
-                    <p className="text-sm text-gray-600 mb-4">{creationStep}</p>
-                  )}
-                </div>
-
-                {/* Отображение захваченного фото */}
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Захваченное фото:</label>
-                  <div className="border-2 border-indigo-300 rounded-lg p-4 bg-gray-50">
-                    <img
-                      src={capturedPhotoUrl}
-                      alt="Захваченное фото"
-                      className="max-w-full h-auto max-h-64 mx-auto rounded-lg shadow-md"
-                    />
-                  </div>
-                </div>
-
-                {/* Форма с данными (можно редактировать) */}
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">ID сотрудника</label>
-                    <input
-                      type="text"
-                      required
-                      value={newUser.hikvision_id}
-                      onChange={(e) => setNewUser({...newUser, hikvision_id: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                      placeholder="Например: 1001"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">ФИО</label>
-                    <input
-                      type="text"
-                      required
-                      value={newUser.full_name}
-                      onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">Отдел (опционально)</label>
-                    <input
-                      type="text"
-                      value={newUser.department}
-                      onChange={(e) => setNewUser({...newUser, department: e.target.value})}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex justify-end gap-2 mt-6">
-                  <button
-                    onClick={() => {
-                      setCapturedPhotoUrl(null);
-                      setNewUserPhoto(null);
-                      setCreationStep('');
-                    }}
-                    className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
-                  >
-                    Захватить заново
-                  </button>
-                  <button
-                    onClick={handleCloseRemoteEnrollment}
-                    className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
-                  >
-                    Отмена
-                  </button>
-                  <button
-                    onClick={() => {
-                      console.log('💾 [BUTTON] Кнопка "Сохранить" нажата');
-                      console.log('📋 [STATE] Состояние перед сохранением:', {
-                        hikvision_id: newUser.hikvision_id,
-                        full_name: newUser.full_name,
-                        hasPhoto: !!newUserPhoto,
-                        photoName: newUserPhoto?.name,
-                        photoSize: newUserPhoto?.size,
-                        isCreating
-                      });
-                      handleCompleteRemoteEnrollment();
-                    }}
-                    disabled={!newUser.hikvision_id || !newUser.full_name || !newUserPhoto || isCreating}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {isCreating ? 'Сохранение...' : 'Сохранить'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {isEnrolling && !enrollmentSuccess && (
-              <div>
-                {/* Ожидание регистрации */}
-                <div className="text-center py-6">
-                  <div className="text-4xl mb-4">⏳</div>
-                  <p className="text-lg font-medium mb-2">Ожидание регистрации...</p>
-                  <p className="text-sm text-gray-600 mb-4">
-                    Подойдите к терминалу и посмотрите в камеру
-                  </p>
-                  
-                  {/* Таймер */}
-                  <div className="mb-4">
-                    <div className="text-3xl font-bold text-indigo-600">{timeLeft} сек</div>
-                  </div>
-
-                  {/* Прогресс-бар */}
-                  <div className="w-full bg-gray-200 rounded-full h-2 mb-6">
-                    <div 
-                      className="bg-indigo-600 h-2 rounded-full transition-all duration-1000"
-                      style={{ width: `${(timeLeft / enrollmentTimeout) * 100}%` }}
-                    ></div>
-                  </div>
-
-                  {creationStep && (
-                    <p className="text-sm text-gray-500 mb-4">{creationStep}</p>
-                  )}
-                </div>
-
-                <div className="flex justify-center">
-                  <button
-                    onClick={handleCancelEnrollment}
-                    className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700"
-                  >
-                    Отменить
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {enrollmentSuccess && (
-              <div className="text-center py-6">
-                <div className="text-5xl mb-4">✅</div>
-                <p className="text-lg font-bold text-green-600 mb-2">Регистрация завершена!</p>
-                <p className="text-sm text-gray-600">Сотрудник успешно добавлен в систему</p>
-              </div>
-            )}
-
-            {enrollmentError && !isEnrolling && (
-              <div className="text-center py-6">
-                <div className="text-5xl mb-4">⚠️</div>
-                <p className="text-lg font-bold text-red-600 mb-2">Ошибка регистрации</p>
-                <div className="text-sm text-gray-600 mb-6 space-y-2">
-                  <p>{enrollmentError}</p>
-                  {enrollmentError.includes('не поддерживается') || enrollmentError.includes('not supported') ? (
-                    <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
-                      <p className="font-medium text-blue-800 mb-2">💡 Альтернативное решение:</p>
-                      <p className="text-blue-700 text-xs">
-                        Используйте способ "Регистрация с интерфейса" для добавления сотрудника вручную.
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-                
-                <div className="flex justify-center gap-3">
-                  <button
-                    onClick={handleCloseRemoteEnrollment}
-                    className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
-                  >
-                    Закрыть
-                  </button>
-                  {!(enrollmentError.includes('не поддерживается') || enrollmentError.includes('not supported')) && (
-                    <button
-                      onClick={handleRetryEnrollment}
-                      className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
-                    >
-                      Повторить попытку
-                    </button>
-                  )}
-                  {(enrollmentError.includes('не поддерживается') || enrollmentError.includes('not supported')) && (
-                    <button
-                      onClick={() => {
-                        handleCloseRemoteEnrollment();
-                        setShowMethodSelection(true);
-                      }}
-                      className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
-                    >
-                      Выбрать другой способ
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Модалка редактирования фото */}
       {editingUser && (
         <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h2 className="text-lg font-bold mb-4">Загрузка фото для {editingUser.full_name}</h2>
+          <div className="bg-white rounded-lg max-w-md w-full p-6 shadow-large border border-gray-200">
+            <h2 className="text-lg font-semibold mb-4 text-gray-900 tracking-tight">Загрузка фото для {editingUser.full_name}</h2>
             <FacePhotoUpload
               onPhotoSelect={setSelectedPhoto}
               currentPhoto={editingUser.photo_path ? `/api${editingUser.photo_path}` : null}
@@ -1013,14 +493,14 @@ const UsersPage = () => {
                   setEditingUser(null);
                   setSelectedPhoto(null);
                 }}
-                className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300"
+                className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
               >
                 Отмена
               </button>
               <button
                 onClick={() => handlePhotoUpload(editingUser.id)}
                 disabled={!selectedPhoto || uploadPhotoMutation.isPending}
-                className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:bg-gray-400"
+                className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 shadow-medium transition-shadow duration-200 font-medium"
               >
                 {uploadPhotoMutation.isPending ? 'Загрузка...' : 'Сохранить'}
               </button>
@@ -1029,11 +509,11 @@ const UsersPage = () => {
         </div>
       )}
 
-      {/* Модалка добавления пользователя (регистрация с интерфейса) */}
-      {isModalOpen && enrollmentMode !== 'device' && (
+      {/* Модалка добавления пользователя */}
+      {isModalOpen && (
         <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full p-6">
-            <h2 className="text-lg font-bold mb-4">Новый сотрудник</h2>
+          <div className="bg-white rounded-lg max-w-2xl w-full p-6 shadow-large border border-gray-200">
+            <h2 className="text-lg font-semibold mb-4 text-gray-900 tracking-tight">Новый сотрудник</h2>
             <form onSubmit={handleSubmit}>
               <div className="grid grid-cols-2 gap-4">
                 {/* Левая колонка - данные */}
@@ -1085,7 +565,7 @@ const UsersPage = () => {
                       type="button"
                       onClick={handleStartFaceCapture}
                       disabled={isCapturingFromTerminal || isCreating || !newUser.hikvision_id}
-                      className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                      className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-medium transition-shadow duration-200 font-medium"
                     >
                       {isCapturingFromTerminal ? (
                         <>
@@ -1152,20 +632,19 @@ const UsersPage = () => {
                     setNewUser({ hikvision_id: '', full_name: '', department: '' });
                     setNewUserPhoto(null);
                     setCapturedPhotoUrl(null);
-                    setTempPhotoFilename(null);
                     setCaptureStatus(null);
                     setCaptureMessage('');
                     setIsCapturingFromTerminal(false);
                   }}
                   disabled={isCreating}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-soft transition-shadow duration-200 font-medium"
                 >
                   Отмена
                 </button>
                 <button
                   type="submit"
                   disabled={isCreating || !newUserPhoto}
-                  className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed shadow-medium transition-shadow duration-200 font-medium"
                 >
                   {isCreating ? 'Создание...' : 'Сохранить и синхронизировать'}
                 </button>

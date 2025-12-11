@@ -34,11 +34,12 @@ class AttendanceEvent(Base):
     __tablename__ = "attendance_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    event_type = Column(String)  # "entry" (вход) или "exit" (выход)
-    terminal_ip = Column(String)  # Чтобы знать, с какого устройства пришло
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
 
-    user = relationship("User", back_populates="events")
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    event_type = Column(String)  # "entry" (вход) или "exit" (выход)
+    terminal_ip = Column(String)  # IP адрес терминала, с которого пришло событие
+
+    # Связь с пользователем (lazy loading для оптимизации)
+    user = relationship("User", back_populates="events", lazy="joined")
 
