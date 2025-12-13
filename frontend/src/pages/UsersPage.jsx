@@ -1,7 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
+import { motion } from 'framer-motion';
 import FacePhotoUpload from '../components/FacePhotoUpload';
+import Button from '../components/ui/Button';
+import Modal from '../components/ui/Modal';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import Badge from '../components/ui/Badge';
+import Skeleton from '../components/ui/Skeleton';
+import EmptyState from '../components/ui/EmptyState';
+import Input from '../components/ui/Input';
+import Card from '../components/ui/Card';
+import VirtualizedTable from '../components/ui/VirtualizedTable';
+import LiveRegion from '../components/accessibility/LiveRegion';
+import showToast from '../utils/toast';
+import { UserGroupIcon, PlusIcon } from '@heroicons/react/24/outline';
 
 const UsersPage = () => {
   const queryClient = useQueryClient();
@@ -20,13 +33,16 @@ const UsersPage = () => {
   const [captureMessage, setCaptureMessage] = useState('');
 
   // Получение пользователей из БД
-  const { data: users, isLoading } = useQuery({
+  // Состояние для принудительного обновления изображений
+  const [imageVersion, setImageVersion] = useState(0);
+  
+  const { data: users, isLoading, refetch: refetchUsers } = useQuery({
     queryKey: ['users'],
     queryFn: async () => {
       const res = await axios.get('/api/users/');
       return res.data;
     },
-    staleTime: Infinity, // Данные никогда не считаются устаревшими
+    staleTime: 0, // Данные всегда считаются устаревшими, чтобы получать актуальные фото
     gcTime: 24 * 60 * 60 * 1000, // 24 часа в кеше
   });
 
@@ -80,7 +96,7 @@ const UsersPage = () => {
     
     if (!newUser.hikvision_id) {
       console.warn('⚠️ [VALIDATION] ID сотрудника не заполнен');
-      alert('Сначала введите ID сотрудника!');
+      showToast.warning('Сначала введите ID сотрудника!');
       return;
     }
     
@@ -176,7 +192,7 @@ const UsersPage = () => {
     e.preventDefault();
     
     if (!newUserPhoto) {
-      alert('Пожалуйста, сделайте фото на терминале или загрузите файл');
+      showToast.warning('Пожалуйста, сделайте фото на терминале или загрузите файл');
       return;
     }
 
@@ -200,6 +216,7 @@ const UsersPage = () => {
         });
       } else {
         console.log('⏭️ [UPLOAD] Пропускаем загрузку фото - используется захваченное на терминале');
+        console.log('ℹ️ [INFO] Фото будет сохранено на сервере при синхронизации с терминалом');
         setCreationStep('Используется фото с терминала...');
       }
       
@@ -207,8 +224,12 @@ const UsersPage = () => {
       setCreationStep('Синхронизация с терминалом...');
       await axios.post(`/api/users/${userId}/sync-to-device`);
       
-      // Успех!
-      queryClient.invalidateQueries(['users']);
+      // Небольшая задержка для обеспечения обновления данных в БД
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Успех! Принудительно обновляем кеш пользователей
+      await queryClient.invalidateQueries(['users']);
+      await queryClient.refetchQueries(['users']);
       setIsModalOpen(false);
       setNewUser({ hikvision_id: '', full_name: '', department: '' });
       setNewUserPhoto(null);
@@ -216,11 +237,11 @@ const UsersPage = () => {
       setCreationStep('');
       setCaptureStatus(null);
       setCaptureMessage('');
-      alert('Сотрудник успешно добавлен и синхронизирован с терминалом!');
+      showToast.success('Сотрудник успешно добавлен и синхронизирован с терминалом!');
       
     } catch (error) {
       const errorMsg = error.response?.data?.detail || error.message;
-      alert(`Ошибка: ${errorMsg}`);
+      showToast.error(`Ошибка: ${errorMsg}`);
     } finally {
       setIsCreating(false);
     }
@@ -235,198 +256,480 @@ const UsersPage = () => {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries(['users']);
-      alert('Фото успешно загружено!');
+    onSuccess: async (data) => {
+      showToast.success('Фото успешно загружено!');
       setEditingUser(null);
       setSelectedPhoto(null);
+      
+      // Полностью удаляем кеш
+      queryClient.removeQueries({ queryKey: ['users'] });
+      
+      // Принудительно обновляем версию изображений
+      setImageVersion(prev => prev + 1);
+      
+      // Принудительно обновляем все изображения на странице
+      setTimeout(() => {
+        const images = document.querySelectorAll('img[src*="/api/uploads/"]');
+        images.forEach(img => {
+          const url = new URL(img.src, window.location.origin);
+          // Удаляем старые параметры
+          url.searchParams.delete('_v');
+          url.searchParams.delete('_t');
+          url.searchParams.delete('_r');
+          // Добавляем новые с timestamp
+          url.searchParams.set('_v', Date.now().toString());
+          url.searchParams.set('_t', imageVersion.toString());
+          url.searchParams.set('_r', Math.random().toString(36).substr(2, 9));
+          // Принудительно обновляем src
+          img.src = url.toString();
+          // Принудительно перезагружаем изображение
+          img.loading = 'eager';
+        });
+      }, 100);
+      
+      // Обновляем данные пользователей
+      await refetchUsers();
     },
     onError: (error) => {
-      alert('Ошибка загрузки фото: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка загрузки фото: ' + (error.response?.data?.detail || error.message));
     }
   });
 
   // Синхронизация с устройством
   const syncMutation = useMutation({
     mutationFn: (userId) => axios.post(`/api/users/${userId}/sync-to-device`),
-    onSuccess: () => {
-      queryClient.invalidateQueries(['users']);
-      alert('Пользователь успешно синхронизирован с устройством!');
+    onSuccess: async () => {
+      await queryClient.invalidateQueries(['users']);
+      await queryClient.refetchQueries(['users']);
+      showToast.success('Пользователь успешно синхронизирован с устройством!');
     },
     onError: (error) => {
-      alert('Ошибка синхронизации: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка синхронизации: ' + (error.response?.data?.detail || error.message));
     }
   });
 
   // Удаление пользователя
   const deleteMutation = useMutation({
     mutationFn: (userId) => axios.delete(`/api/users/${userId}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries(['users']);
-      alert('Пользователь успешно удален!');
+    onSuccess: async () => {
+      await queryClient.invalidateQueries(['users']);
+      await queryClient.refetchQueries(['users']);
+      showToast.success('Пользователь успешно удален!');
     },
     onError: (error) => {
-      alert('Ошибка удаления: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка удаления: ' + (error.response?.data?.detail || error.message));
     }
   });
 
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+
   const handleDelete = (userId, userName) => {
-    if (window.confirm(`Вы уверены, что хотите удалить пользователя "${userName}"? Это действие нельзя отменить.`)) {
-      deleteMutation.mutate(userId);
-    }
+    setDeleteConfirm({ userId, userName });
   };
+
+  const [syncConfirm, setSyncConfirm] = useState(null);
 
   const handlePhotoUpload = (userId) => {
     if (!selectedPhoto) {
-      alert('Выберите фото');
+      showToast.warning('Выберите фото');
       return;
     }
     uploadPhotoMutation.mutate({ userId, file: selectedPhoto });
   };
 
   const handleSync = (userId) => {
-    if (window.confirm('Синхронизировать пользователя с терминалом?')) {
-      syncMutation.mutate(userId);
-    }
+    setSyncConfirm(userId);
   };
 
-  if (isLoading) return <div className="p-8">Загрузка...</div>;
+  // Объединяем пользователей из БД и терминала
+  const mergedUsers = useMemo(() => {
+    if (!users) return [];
+    
+    // Создаем Map для быстрого поиска пользователей из БД по hikvision_id
+    const dbUsersMap = new Map();
+    users.forEach(user => {
+      dbUsersMap.set(user.hikvision_id, user);
+    });
+    
+    // Создаем объединенный список
+    const merged = [];
+    const processedIds = new Set();
+    
+    // Сначала добавляем пользователей из БД
+    users.forEach(user => {
+      merged.push({
+        ...user,
+        source: 'db',
+        terminalData: null
+      });
+      processedIds.add(user.hikvision_id);
+    });
+    
+    // Затем добавляем пользователей с терминала, которых нет в БД
+    if (terminalUsers && selectedDeviceId) {
+      terminalUsers.forEach(terminalUser => {
+        const employeeNo = terminalUser.employeeNo;
+        if (employeeNo && !processedIds.has(employeeNo)) {
+          merged.push({
+            id: null,
+            hikvision_id: employeeNo,
+            full_name: terminalUser.name || 'Не указано',
+            department: null,
+            photo_path: null,
+            is_active: true,
+            synced_to_device: false,
+            role: 'cleaner',
+            source: 'terminal',
+            terminalData: terminalUser
+          });
+          processedIds.add(employeeNo);
+        } else if (employeeNo && processedIds.has(employeeNo)) {
+          // Обновляем данные пользователя из БД информацией с терминала
+          const dbUser = dbUsersMap.get(employeeNo);
+          if (dbUser) {
+            const index = merged.findIndex(u => u.id === dbUser.id);
+            if (index !== -1) {
+              merged[index] = {
+                ...merged[index],
+                terminalData: terminalUser
+              };
+            }
+          }
+        }
+      });
+    }
+    
+    return merged;
+  }, [users, terminalUsers, selectedDeviceId]);
 
-  // Получаем активное устройство или первое доступное
-  const activeDevice = devices?.find(d => d.is_active) || devices?.[0];
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex justify-between items-center">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-10 w-40" />
+        </div>
+        <Card>
+          <div className="space-y-4">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="flex items-center gap-4">
+                <Skeleton variant="circular" width={48} height={48} />
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-3 w-48" />
+                </div>
+                <Skeleton className="h-8 w-24" />
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  const [liveMessage, setLiveMessage] = useState('');
 
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Сотрудники</h1>
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
-        >
-          Добавить сотрудника
-        </button>
+    <div>
+      <LiveRegion message={liveMessage} priority="polite" />
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Сотрудники</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Управление сотрудниками и их фотографиями для распознавания
+          </p>
+        </div>
+        <div className="flex items-center gap-4 w-full sm:w-auto">
+          {devices && devices.length > 0 && (
+            <select
+              value={selectedDeviceId || ''}
+              onChange={(e) => {
+                handleDeviceChange(e.target.value);
+              }}
+              className="flex-1 sm:flex-none border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)]"
+            >
+              <option value="">Все устройства</option>
+              {devices.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.name} ({device.ip_address})
+                </option>
+              ))}
+            </select>
+          )}
+          <Button onClick={() => setIsModalOpen(true)} aria-describedby="users-page-description">
+            <PlusIcon className="h-4 w-4 mr-2" aria-hidden="true" />
+            Добавить сотрудника
+          </Button>
+        </div>
       </div>
 
-      {/* Список пользователей с терминала */}
-      {devices && devices.length > 0 && (
-        <div className="mb-6 bg-white shadow-card rounded-lg p-4 border border-gray-100">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-gray-900 tracking-tight">Пользователи с терминала</h2>
-            <div className="flex items-center gap-2">
-              <select
-                value={selectedDeviceId || ''}
-                onChange={(e) => {
-                  handleDeviceChange(e.target.value);
-                }}
-                className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+      {/* Объединенная таблица сотрудников */}
+      {mergedUsers && mergedUsers.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={UserGroupIcon}
+            title="Нет сотрудников"
+            description="Начните с добавления первого сотрудника в систему"
+            action={
+              <Button onClick={() => setIsModalOpen(true)}>
+                <PlusIcon className="h-4 w-4 mr-2" />
+                Добавить сотрудника
+              </Button>
+            }
+          />
+        </Card>
+      ) : (
+        <>
+          {/* Desktop table view */}
+          <div className="hidden lg:block">
+          {mergedUsers && mergedUsers.length > 50 ? (
+            // Виртуализированная таблица для больших списков
+            <VirtualizedTable
+              columns={[
+                {
+                  key: 'user',
+                  label: 'Сотрудник',
+                  width: '40%',
+                  render: (_, user) => (
+                    <div className="flex items-center gap-3">
+                      {user.photo_path ? (
+                        <img
+                          className="h-10 w-10 rounded-full object-cover"
+                          src={`/api${user.photo_path.startsWith('/') ? user.photo_path : '/' + user.photo_path}?_v=${user.photo_path.split('/').pop()}&_t=${imageVersion}&_r=${Math.random().toString(36).substr(2, 9)}`}
+                          alt={user.full_name || user.hikvision_id}
+                          onError={(e) => {
+                            e.target.onerror = null;
+                            e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="40" height="40"%3E%3Crect fill="%23e5e7eb" width="40" height="40" rx="20"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%236b7280" font-size="12"%3E' + encodeURIComponent((user.full_name || user.hikvision_id || 'U')[0]) + '%3C/text%3E%3C/svg%3E';
+                          }}
+                        />
+                      ) : (
+                        <div className="h-10 w-10 rounded-full bg-gray-200 flex items-center justify-center">
+                          <span className="text-sm font-medium text-gray-600">
+                            {(user.full_name || user.hikvision_id || 'U')[0]}
+                          </span>
+                        </div>
+                      )}
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">
+                          {user.full_name || 'Без имени'}
+                        </div>
+                        <div className="text-sm text-gray-500">
+                          ID: {user.hikvision_id}
+                        </div>
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  key: 'status',
+                  label: 'Статус',
+                  width: '30%',
+                  render: (_, user) => (
+                    <div className="flex flex-wrap gap-1">
+                      <Badge variant={user.is_active ? 'success' : 'error'}>
+                        {user.is_active ? 'Активен' : 'Неактивен'}
+                      </Badge>
+                      {user.synced_to_device && (
+                        <Badge variant="primary">Синхронизирован</Badge>
+                      )}
+                      {user.terminalData && user.terminalData.numOfFace > 0 && (
+                        <Badge variant="purple">
+                          {user.terminalData.numOfFace} фото
+                        </Badge>
+                      )}
+                    </div>
+                  ),
+                },
+                {
+                  key: 'actions',
+                  label: 'Действия',
+                  width: '30%',
+                  render: (_, user) => (
+                    user.id ? (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingUser(user);
+                          }}
+                        >
+                          Фото
+                        </Button>
+                        <Button
+                          variant="success"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSync(user.id);
+                          }}
+                          disabled={!user.photo_path || syncMutation.isPending}
+                          loading={syncMutation.isPending}
+                        >
+                          Синхр.
+                        </Button>
+                        <Button
+                          variant="error"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDelete(user.id, user.full_name);
+                          }}
+                          disabled={deleteMutation.isPending}
+                          loading={deleteMutation.isPending}
+                        >
+                          Удалить
+                        </Button>
+                      </div>
+                    ) : null
+                  ),
+                },
+              ]}
+              data={mergedUsers}
+              height={600}
+              itemSize={80}
+              aria-label="Список сотрудников"
+            />
+          ) : (
+            // Обычная таблица для небольших списков
+            <Card>
+            <div className="overflow-x-auto">
+              <table 
+                className="min-w-full divide-y divide-gray-200"
+                role="table"
+                aria-label="Список сотрудников"
               >
-                <option value="">Выберите устройство</option>
-                {devices.map((device) => (
-                  <option key={device.id} value={device.id}>
-                    {device.name} ({device.ip_address})
-                  </option>
-                ))}
-              </select>
-              {selectedDeviceId && (
-                <button
-                  onClick={() => refetchTerminal()}
-                  disabled={isLoadingTerminal}
-                  className="bg-gray-100 text-gray-700 px-3 py-2 rounded-md hover:bg-gray-200 text-sm disabled:opacity-50 shadow-soft transition-shadow duration-200 font-medium"
-                >
-                  {isLoadingTerminal ? 'Загрузка...' : 'Обновить'}
-                </button>
-              )}
+                <caption className="sr-only">Таблица сотрудников с информацией о статусе и действиях</caption>
+                <thead className="bg-gray-50">
+                  <tr role="row">
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                      Сотрудник
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                      Статус
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                      Действия
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200" role="rowgroup">
+                  {mergedUsers?.map((user) => (
+                    <tr key={user.id || user.hikvision_id} className="hover:bg-gray-50" role="row">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center gap-3">
+                          {user.photo_path ? (
+                            <img
+                              className="h-10 w-10 rounded-full object-cover"
+                              src={`/api${user.photo_path.startsWith('/') ? user.photo_path : '/' + user.photo_path}?_v=${user.photo_path.split('/').pop()}&_t=${imageVersion}&_r=${Math.random().toString(36).substr(2, 9)}`}
+                              alt={user.full_name || user.hikvision_id}
+                              key={`photo-${user.id || user.hikvision_id}-${user.photo_path}-${imageVersion}-${Date.now()}`}
+                              onError={(e) => {
+                                e.target.onerror = null;
+                                e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="40" height="40"%3E%3Crect fill="%23e5e7eb" width="40" height="40" rx="20"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%236b7280" font-size="12"%3E' + encodeURIComponent((user.full_name || user.hikvision_id || 'U')[0]) + '%3C/text%3E%3C/svg%3E';
+                              }}
+                            />
+                          ) : (
+                            <div className="h-10 w-10 rounded-full bg-gray-200 flex items-center justify-center">
+                              <span className="text-sm font-medium text-gray-600">
+                                {(user.full_name || user.hikvision_id || 'U')[0]}
+                              </span>
+                            </div>
+                          )}
+                          <div>
+                            <div className="text-sm font-medium text-gray-900">
+                              {user.full_name || 'Без имени'}
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              ID: {user.hikvision_id}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex flex-wrap gap-1">
+                          <Badge variant={user.is_active ? 'success' : 'error'}>
+                            {user.is_active ? 'Активен' : 'Неактивен'}
+                          </Badge>
+                          {user.synced_to_device && (
+                            <Badge variant="primary">Синхронизирован</Badge>
+                          )}
+                          {user.terminalData && user.terminalData.numOfFace > 0 && (
+                            <Badge variant="purple">
+                              {user.terminalData.numOfFace} фото
+                            </Badge>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        {user.id && (
+                          <div className="flex items-center gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setEditingUser(user)}
+                            >
+                              Фото
+                            </Button>
+                        <Button
+                          variant="success"
+                          size="sm"
+                          onClick={() => handleSync(user.id)}
+                          disabled={!user.photo_path || syncMutation.isPending}
+                          loading={syncMutation.isPending}
+                          aria-label={`Синхронизировать ${user.full_name || user.hikvision_id} с терминалом`}
+                        >
+                          Синхр.
+                        </Button>
+                        <Button
+                          variant="error"
+                          size="sm"
+                          onClick={() => handleDelete(user.id, user.full_name)}
+                          disabled={deleteMutation.isPending}
+                          loading={deleteMutation.isPending}
+                          aria-label={`Удалить сотрудника ${user.full_name || user.hikvision_id}`}
+                        >
+                          Удалить
+                        </Button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
+          </Card>
+          )}
           </div>
 
-          {selectedDeviceId ? (
-            isLoadingTerminal ? (
-              <div className="text-center py-8 text-gray-500">Загрузка пользователей с терминала...</div>
-            ) : terminalUsers ? (
-              terminalUsers.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          ID
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Имя
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Тип
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Статус фото
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Двери
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                      {terminalUsers.map((user, index) => {
-                        const hasPhoto = user.numOfFace > 0;
-                        
-                        return (
-                          <tr key={user.employeeNo || index} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
-                              {user.employeeNo || 'N/A'}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                              {user.name || 'Не указано'}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                              {user.userType || 'normal'}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                              {hasPhoto ? (
-                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                                  {user.numOfFace} фото
-                                </span>
-                              ) : (
-                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
-                                  Нет фото
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                              {user.doorRight || 'N/A'}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  <div className="mt-2 text-sm text-gray-500">
-                    Всего пользователей: {terminalUsers.length}
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-8 text-gray-500">На терминале нет пользователей</div>
-              )
-            ) : (
-              <div className="text-center py-8 text-red-500">Ошибка загрузки пользователей с терминала</div>
-            )
-          ) : (
-            <div className="text-center py-8 text-gray-400">Выберите устройство для просмотра пользователей</div>
-          )}
-        </div>
-      )}
-
-      {/* Таблица */}
-      <div className="bg-white shadow-card overflow-hidden sm:rounded-lg border border-gray-100">
-        <ul className="divide-y divide-gray-200">
-          {users?.map((user) => (
-            <li key={user.id} className="px-4 py-4 sm:px-6 hover:bg-gray-50 transition-colors duration-150">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
+          {/* Mobile card view */}
+          <div className="lg:hidden">
+          <Card>
+            <div className="divide-y divide-gray-200">
+              {mergedUsers?.map((user, index) => (
+                <motion.div
+                  key={user.id || user.hikvision_id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2, delay: index * 0.03 }}
+                  className="px-4 py-4 sm:px-6 hover:bg-gray-50 transition-colors duration-150"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
                   {user.photo_path ? (
                     <img 
-                      src={`/api${user.photo_path}`}
+                      src={`/api${user.photo_path.startsWith('/') ? user.photo_path : '/' + user.photo_path}?_v=${user.photo_path.split('/').pop()}&_t=${imageVersion}&_r=${Math.random().toString(36).substr(2, 9)}`}
                       alt={user.full_name}
                       className="h-12 w-12 rounded-full object-cover shadow-soft border-2 border-gray-100"
+                      key={`photo-card-${user.id || user.hikvision_id}-${user.photo_path}-${imageVersion}-${Date.now()}`}
+                      loading="lazy"
+                      onError={(e) => {
+                        // Если изображение не загрузилось, заменяем на placeholder
+                        e.target.onerror = null; // Предотвращаем бесконечный цикл
+                        e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="48" height="48"%3E%3Crect fill="%23e5e7eb" width="48" height="48" rx="24"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%236b7280" font-size="12"%3E' + encodeURIComponent((user.full_name || user.hikvision_id || 'U')[0]) + '%3C/text%3E%3C/svg%3E';
+                      }}
                     />
                   ) : (
                     <div className="h-12 w-12 rounded-full bg-gray-200 flex items-center justify-center shadow-soft border-2 border-gray-100">
@@ -437,154 +740,192 @@ const UsersPage = () => {
                     <p className="text-sm font-semibold text-gray-900 truncate">{user.full_name}</p>
                     <p className="flex items-center text-sm text-gray-500 mt-0.5">
                       ID: <span className="font-medium text-gray-700 ml-1">{user.hikvision_id}</span> | Отдел: <span className="ml-1">{user.department || 'Не указан'}</span>
+                      {user.source === 'terminal' && (
+                        <span className="ml-2 px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded-full">
+                          Только на терминале
+                        </span>
+                      )}
                     </p>
                   </div>
-                </div>
-                <div className="ml-2 flex items-center space-x-2">
-                  <span className={`px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full shadow-soft ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                    </div>
+                    <div className="ml-2 flex items-center space-x-2">
+                  <Badge variant={user.is_active ? 'success' : 'error'}>
                     {user.is_active ? 'Активен' : 'Неактивен'}
-                  </span>
+                  </Badge>
                   {user.synced_to_device && (
-                    <span className="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 shadow-soft">
-                      Синхронизирован
-                    </span>
+                    <Badge variant="primary">Синхронизирован</Badge>
                   )}
-                  <button
-                    onClick={() => setEditingUser(user)}
-                    className="text-indigo-600 hover:text-indigo-900 text-sm font-medium px-2 py-1 rounded hover:bg-indigo-50 transition-colors duration-150"
-                  >
-                    Фото
-                  </button>
-                  <button
-                    onClick={() => handleSync(user.id)}
-                    disabled={!user.photo_path || syncMutation.isPending}
-                    className="text-green-600 hover:text-green-900 text-sm font-medium px-2 py-1 rounded hover:bg-green-50 transition-colors duration-150 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                  >
-                    Синхронизировать
-                  </button>
-                  <button
-                    onClick={() => handleDelete(user.id, user.full_name)}
-                    disabled={deleteMutation.isPending}
-                    className="text-red-600 hover:text-red-900 text-sm font-medium px-2 py-1 rounded hover:bg-red-50 transition-colors duration-150 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                  >
-                    {deleteMutation.isPending ? 'Удаление...' : 'Удалить'}
-                  </button>
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </div>
+                  {user.terminalData && user.terminalData.numOfFace > 0 && (
+                    <Badge variant="purple">
+                      {user.terminalData.numOfFace} фото на терминале
+                    </Badge>
+                  )}
+                  {user.id && (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setEditingUser(user)}
+                      >
+                        Фото
+                      </Button>
+                      <Button
+                        variant="success"
+                        size="sm"
+                        onClick={() => handleSync(user.id)}
+                        disabled={!user.photo_path || syncMutation.isPending}
+                        loading={syncMutation.isPending}
+                      >
+                        Синхронизировать
+                      </Button>
+                      <Button
+                        variant="error"
+                        size="sm"
+                        onClick={() => handleDelete(user.id, user.full_name)}
+                        disabled={deleteMutation.isPending}
+                        loading={deleteMutation.isPending}
+                      >
+                        Удалить
+                      </Button>
+                    </div>
+                  )}
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          </Card>
+        </div>
+        </>
+      )}
 
 
       {/* Модалка редактирования фото */}
-      {editingUser && (
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6 shadow-large border border-gray-200">
-            <h2 className="text-lg font-semibold mb-4 text-gray-900 tracking-tight">Загрузка фото для {editingUser.full_name}</h2>
-            <FacePhotoUpload
-              onPhotoSelect={setSelectedPhoto}
-              currentPhoto={editingUser.photo_path ? `/api${editingUser.photo_path}` : null}
-            />
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingUser(null);
-                  setSelectedPhoto(null);
-                }}
-                className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={() => handlePhotoUpload(editingUser.id)}
-                disabled={!selectedPhoto || uploadPhotoMutation.isPending}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 shadow-medium transition-shadow duration-200 font-medium"
-              >
-                {uploadPhotoMutation.isPending ? 'Загрузка...' : 'Сохранить'}
-              </button>
-            </div>
+      <Modal
+        isOpen={!!editingUser}
+        onClose={() => {
+          setEditingUser(null);
+          setSelectedPhoto(null);
+        }}
+        title={`Загрузка фото для ${editingUser?.full_name}`}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditingUser(null);
+                setSelectedPhoto(null);
+              }}
+            >
+              Отмена
+            </Button>
+            <Button
+              onClick={() => handlePhotoUpload(editingUser.id)}
+              disabled={!selectedPhoto || uploadPhotoMutation.isPending}
+              loading={uploadPhotoMutation.isPending}
+            >
+              Сохранить
+            </Button>
           </div>
-        </div>
-      )}
+        }
+      >
+        {editingUser && (
+          <FacePhotoUpload
+            onPhotoSelect={setSelectedPhoto}
+            currentPhoto={editingUser.photo_path ? `/api${editingUser.photo_path.startsWith('/') ? editingUser.photo_path : '/' + editingUser.photo_path}` : null}
+          />
+        )}
+      </Modal>
 
       {/* Модалка добавления пользователя */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full p-6 shadow-large border border-gray-200">
-            <h2 className="text-lg font-semibold mb-4 text-gray-900 tracking-tight">Новый сотрудник</h2>
-            <form onSubmit={handleSubmit}>
-              <div className="grid grid-cols-2 gap-4">
-                {/* Левая колонка - данные */}
-                <div>
-                  <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700">ID (с терминала)</label>
-                    <input
-                      type="text"
-                      required
-                      disabled={isCreating}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border disabled:bg-gray-100"
-                      value={newUser.hikvision_id}
-                      onChange={(e) => setNewUser({...newUser, hikvision_id: e.target.value})}
-                      placeholder="Например: 1001"
-                    />
-                  </div>
-                  <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700">ФИО</label>
-                    <input
-                      type="text"
-                      required
-                      disabled={isCreating}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border disabled:bg-gray-100"
-                      value={newUser.full_name}
-                      onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
-                    />
-                  </div>
-                  <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700">Отдел</label>
-                    <input
-                      type="text"
-                      disabled={isCreating}
-                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border disabled:bg-gray-100"
-                      value={newUser.department}
-                      onChange={(e) => setNewUser({...newUser, department: e.target.value})}
-                    />
-                  </div>
-                </div>
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => {
+          setIsModalOpen(false);
+          setNewUser({ hikvision_id: '', full_name: '', department: '' });
+          setNewUserPhoto(null);
+          setCapturedPhotoUrl(null);
+          setCaptureStatus(null);
+          setCaptureMessage('');
+          setIsCapturingFromTerminal(false);
+        }}
+        title="Новый сотрудник"
+        size="xl"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setIsModalOpen(false);
+                setNewUser({ hikvision_id: '', full_name: '', department: '' });
+                setNewUserPhoto(null);
+                setCapturedPhotoUrl(null);
+                setCaptureStatus(null);
+                setCaptureMessage('');
+                setIsCapturingFromTerminal(false);
+              }}
+              disabled={isCreating}
+            >
+              Отмена
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={isCreating || !newUserPhoto}
+              loading={isCreating}
+            >
+              Сохранить и синхронизировать
+            </Button>
+          </div>
+        }
+      >
+        <form onSubmit={handleSubmit}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Левая колонка - данные */}
+            <div className="space-y-4">
+              <Input
+                label="ID (с терминала)"
+                type="text"
+                required
+                disabled={isCreating}
+                value={newUser.hikvision_id}
+                onChange={(e) => setNewUser({...newUser, hikvision_id: e.target.value})}
+                placeholder="Например: 1001"
+              />
+              <Input
+                label="ФИО"
+                type="text"
+                required
+                disabled={isCreating}
+                value={newUser.full_name}
+                onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
+              />
+              <Input
+                label="Отдел"
+                type="text"
+                disabled={isCreating}
+                value={newUser.department}
+                onChange={(e) => setNewUser({...newUser, department: e.target.value})}
+              />
+            </div>
                 
-                {/* Правая колонка - фото */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Фото для распознавания лица
-                  </label>
-                  
-                  {/* Кнопка захвата с терминала */}
-                  <div className="mb-3">
-                    <button
-                      type="button"
-                      onClick={handleStartFaceCapture}
-                      disabled={isCapturingFromTerminal || isCreating || !newUser.hikvision_id}
-                      className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-medium transition-shadow duration-200 font-medium"
-                    >
-                      {isCapturingFromTerminal ? (
-                        <>
-                          <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          <span>Захват...</span>
-                        </>
-                      ) : (
-                        <>
-                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                          </svg>
-                          <span>Захват с терминала</span>
-                        </>
-                      )}
-                    </button>
+            {/* Правая колонка - фото */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Фото для распознавания лица
+              </label>
+              
+              {/* Кнопка захвата с терминала */}
+              <div className="mb-3">
+                <Button
+                  type="button"
+                  variant="success"
+                  onClick={handleStartFaceCapture}
+                  disabled={isCapturingFromTerminal || isCreating || !newUser.hikvision_id}
+                  loading={isCapturingFromTerminal}
+                  className="w-full"
+                >
+                  Захват с терминала
+                </Button>
                     
                     {/* Статус захвата */}
                     {captureStatus && (
@@ -609,50 +950,53 @@ const UsersPage = () => {
                     currentPhoto={capturedPhotoUrl ? (capturedPhotoUrl.startsWith('blob:') ? capturedPhotoUrl : `/api${capturedPhotoUrl}`) : null}
                   />
                 </div>
-              </div>
 
-              {/* Прогресс создания */}
-              {isCreating && (
-                <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-md">
-                  <div className="flex items-center">
-                    <svg className="animate-spin h-5 w-5 text-blue-600 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <span className="text-sm text-blue-800">{creationStep}</span>
-                  </div>
+            {/* Прогресс создания */}
+            {isCreating && (
+              <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-md">
+                <div className="flex items-center">
+                  <svg className="animate-spin h-5 w-5 text-blue-600 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span className="text-sm text-blue-800">{creationStep}</span>
                 </div>
-              )}
-
-              <div className="flex justify-end gap-2 mt-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsModalOpen(false);
-                    setNewUser({ hikvision_id: '', full_name: '', department: '' });
-                    setNewUserPhoto(null);
-                    setCapturedPhotoUrl(null);
-                    setCaptureStatus(null);
-                    setCaptureMessage('');
-                    setIsCapturingFromTerminal(false);
-                  }}
-                  disabled={isCreating}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-soft transition-shadow duration-200 font-medium"
-                >
-                  Отмена
-                </button>
-                <button
-                  type="submit"
-                  disabled={isCreating || !newUserPhoto}
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed shadow-medium transition-shadow duration-200 font-medium"
-                >
-                  {isCreating ? 'Создание...' : 'Сохранить и синхронизировать'}
-                </button>
               </div>
-            </form>
+            )}
           </div>
-        </div>
-      )}
+        </form>
+      </Modal>
+
+      {/* Confirm dialogs */}
+      <ConfirmDialog
+        isOpen={!!deleteConfirm}
+        onClose={() => setDeleteConfirm(null)}
+        onConfirm={() => {
+          if (deleteConfirm) {
+            deleteMutation.mutate(deleteConfirm.userId);
+          }
+        }}
+        title="Удаление сотрудника"
+        message={`Вы уверены, что хотите удалить сотрудника "${deleteConfirm?.userName}"? Это действие нельзя отменить.`}
+        confirmText="Удалить"
+        cancelText="Отмена"
+        variant="error"
+      />
+
+      <ConfirmDialog
+        isOpen={!!syncConfirm}
+        onClose={() => setSyncConfirm(null)}
+        onConfirm={() => {
+          if (syncConfirm) {
+            syncMutation.mutate(syncConfirm);
+          }
+        }}
+        title="Синхронизация"
+        message="Синхронизировать пользователя с терминалом?"
+        confirmText="Синхронизировать"
+        cancelText="Отмена"
+        variant="info"
+      />
     </div>
   );
 };

@@ -1,6 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
+import { motion } from 'framer-motion';
+import Button from '../components/ui/Button';
+import Card from '../components/ui/Card';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import Skeleton from '../components/ui/Skeleton';
+import EmptyState from '../components/ui/EmptyState';
+import Badge from '../components/ui/Badge';
+import Dropdown, { DropdownItem } from '../components/ui/Dropdown';
+import VirtualizedTable from '../components/ui/VirtualizedTable';
+import showToast from '../utils/toast';
+import { CalendarIcon, ArrowDownTrayIcon, ChevronDownIcon, WifiIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { exportToPDF, exportToExcel } from '../utils/export';
+import { useEventsWebSocket } from '../hooks/useWebSocket';
 
 const EventsPage = () => {
   const queryClient = useQueryClient();
@@ -16,6 +29,21 @@ const EventsPage = () => {
   const [endDate, setEndDate] = useState(() => {
     return new Date().toISOString().split('T')[0];
   });
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(24);
+
+  // WebSocket для реального времени обновлений
+  const { isConnected, lastMessage } = useEventsWebSocket({
+    enabled: true,
+    onMessage: (message) => {
+      if (message.type === 'event_update') {
+        // Обновляем данные при получении нового события
+        queryClient.invalidateQueries(['events']);
+        showToast('Новое событие получено!', 'info');
+      }
+    }
+  });
+  const [showOnlyEmployees, setShowOnlyEmployees] = useState(true); // Фильтр: показывать только события сотрудников
 
   // Получение устройств
   const { data: devices } = useQuery({
@@ -28,6 +56,18 @@ const EventsPage = () => {
     gcTime: 24 * 60 * 60 * 1000,
   });
 
+  // Получение статуса подписки
+  const { data: subscriptionStatus } = useQuery({
+    queryKey: ['subscription-status', selectedDeviceId],
+    queryFn: async () => {
+      if (!selectedDeviceId) return null;
+      const res = await axios.get(`/api/devices/${selectedDeviceId}/events/subscription-status`);
+      return res.data;
+    },
+    enabled: !!selectedDeviceId,
+    refetchInterval: 5000, // Обновляем каждые 5 секунд
+  });
+
   // Получение событий с терминала
   const { data: eventsData, isLoading, refetch } = useQuery({
     queryKey: ['device-events', selectedDeviceId, startDate, endDate],
@@ -36,14 +76,14 @@ const EventsPage = () => {
       const params = new URLSearchParams();
       if (startDate) params.append('start_date', startDate);
       if (endDate) params.append('end_date', endDate);
-      params.append('max_records', '500');
+      params.append('max_records', '1000');
       
       const res = await axios.get(`/api/devices/${selectedDeviceId}/events?${params.toString()}`);
       return res.data;
     },
     enabled: !!selectedDeviceId,
     retry: false,
-    staleTime: 0, // Всегда получаем свежие данные с терминала
+    staleTime: 0,
   });
 
   // Синхронизация событий в БД
@@ -58,54 +98,168 @@ const EventsPage = () => {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries(['device-events']);
-      alert(`Синхронизация завершена!\nСинхронизировано: ${data.data.stats.synced}\nПропущено: ${data.data.stats.skipped}`);
+      showToast.success(`Синхронизация завершена! Синхронизировано: ${data.data.stats.synced}, Пропущено: ${data.data.stats.skipped}`);
     },
     onError: (error) => {
-      alert('Ошибка синхронизации: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка синхронизации: ' + (error.response?.data?.detail || error.message));
     }
   });
 
-  const handleSync = () => {
-    if (window.confirm('Синхронизировать события с терминала в базу данных?')) {
-      syncMutation.mutate();
+  // Настройка webhook
+  const configureWebhookMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedDeviceId) return;
+      return axios.post(`/api/devices/${selectedDeviceId}/webhook/configure`);
+    },
+    onSuccess: (data) => {
+      if (data.data.success) {
+        showToast.success('Webhook успешно настроен');
+      } else {
+        showToast.warning('Webhook настроен, но может потребоваться ручная настройка: ' + (data.data.message || ''));
+      }
+    },
+    onError: (error) => {
+      showToast.error('Ошибка настройки webhook: ' + (error.response?.data?.detail || error.message));
     }
+  });
+
+  // Подписка на события
+  const subscribeMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedDeviceId) return;
+      // Сначала настраиваем webhook
+      await configureWebhookMutation.mutateAsync();
+      // Затем запускаем подписку
+      return axios.post(`/api/devices/${selectedDeviceId}/events/subscribe`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries(['subscription-status', selectedDeviceId]);
+      showToast.success('Подписка на события запущена (webhook настроен)');
+    },
+    onError: (error) => {
+      showToast.error('Ошибка запуска подписки: ' + (error.response?.data?.detail || error.message));
+    }
+  });
+
+  // Отписка от событий
+  const unsubscribeMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedDeviceId) return;
+      return axios.post(`/api/devices/${selectedDeviceId}/events/unsubscribe`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries(['subscription-status', selectedDeviceId]);
+      showToast.success('Подписка на события остановлена');
+    },
+    onError: (error) => {
+      showToast.error('Ошибка остановки подписки: ' + (error.response?.data?.detail || error.message));
+    }
+  });
+
+  const [syncConfirm, setSyncConfirm] = useState(false);
+  const [subscribeConfirm, setSubscribeConfirm] = useState(false);
+  const [unsubscribeConfirm, setUnsubscribeConfirm] = useState(false);
+
+  const handleSync = () => {
+    setSyncConfirm(true);
+  };
+
+  const handleSubscribe = () => {
+    setSubscribeConfirm(true);
+  };
+
+  const handleUnsubscribe = () => {
+    setUnsubscribeConfirm(true);
   };
 
   const formatDateTime = (dateString) => {
-    if (!dateString) return 'N/A';
+    if (!dateString) return '--';
     try {
       const date = new Date(dateString);
+      // Конвертируем в часовой пояс Баку (UTC+4, Asia/Baku)
       return date.toLocaleString('ru-RU', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit'
+        second: '2-digit',
+        timeZone: 'Asia/Baku'
       });
     } catch {
       return dateString;
     }
   };
 
-  const getEventTypeLabel = (eventType) => {
-    if (eventType === 'entry') {
-      return <span className="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 shadow-soft">Вход</span>;
-    } else if (eventType === 'exit') {
-      return <span className="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 shadow-soft">Выход</span>;
+  const formatDate = (dateString) => {
+    if (!dateString) return '--';
+    try {
+      const date = new Date(dateString);
+      // Конвертируем в часовой пояс Баку (UTC+4, Asia/Baku)
+      return date.toLocaleDateString('ru-RU', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        timeZone: 'Asia/Baku'
+      });
+    } catch {
+      return dateString;
     }
-    return <span className="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 shadow-soft">{eventType}</span>;
   };
 
+  // Фильтруем события: показываем только события сотрудников, если включен фильтр
+  const events = eventsData?.events || [];
+  const filteredEvents = React.useMemo(() => {
+    if (showOnlyEmployees) {
+      return events.filter(event => event.employee_no && event.employee_no.trim() !== '');
+    }
+    return events;
+  }, [events, showOnlyEmployees]);
+
+  // Пагинация
+  const totalEvents = filteredEvents.length;
+  const totalPages = Math.ceil(totalEvents / pageSize);
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
+  const paginatedEvents = filteredEvents.slice(startIndex, endIndex);
+
+  // Сброс страницы при изменении фильтров
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [startDate, endDate, selectedDeviceId, pageSize, showOnlyEmployees]);
+
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">События с терминала</h1>
-      </div>
+    <div role="main">
+      <header className="mb-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900 tracking-tight" id="events-page-title">
+              События с терминала
+            </h1>
+            <p className="mt-1 text-sm text-gray-500" id="events-page-description">
+              Просмотр и управление событиями доступа с терминалов
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+              isConnected
+                ? 'bg-green-100 text-green-800'
+                : 'bg-red-100 text-red-800'
+            }`}>
+              {isConnected ? (
+                <WifiIcon className="w-3 h-3" />
+              ) : (
+                <ExclamationTriangleIcon className="w-3 h-3" />
+              )}
+              {isConnected ? 'Онлайн' : 'Оффлайн'}
+            </div>
+          </div>
+        </div>
+      </header>
 
       {/* Фильтры */}
-      <div className="bg-white shadow-card rounded-lg p-4 mb-6 border border-gray-100">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <Card className="mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Устройство</label>
             <select
@@ -119,7 +273,7 @@ const EventsPage = () => {
                   localStorage.removeItem('selectedDeviceId');
                 }
               }}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-soft"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)] shadow-soft"
             >
               <option value="">Выберите устройство</option>
               {devices?.map((device) => (
@@ -136,7 +290,7 @@ const EventsPage = () => {
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-soft"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)] shadow-soft"
             />
           </div>
 
@@ -146,109 +300,462 @@ const EventsPage = () => {
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-soft"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)] shadow-soft"
             />
           </div>
 
+          <div className="flex items-end">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showOnlyEmployees}
+                onChange={(e) => {
+                  setShowOnlyEmployees(e.target.checked);
+                  setCurrentPage(1);
+                }}
+                className="w-4 h-4 text-[rgb(19,91,147)] border-gray-300 rounded focus:ring-[rgb(19,91,147)]"
+              />
+              <span className="text-sm font-medium text-gray-700">
+                Только события сотрудников
+              </span>
+            </label>
+          </div>
+
           <div className="flex items-end gap-2">
-            <button
+            <Button
               onClick={() => refetch()}
               disabled={!selectedDeviceId || isLoading}
-              className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
+              loading={isLoading}
             >
-              {isLoading ? 'Загрузка...' : 'Обновить'}
-            </button>
-            <button
+              Обновить
+            </Button>
+            <Button
+              variant="success"
               onClick={handleSync}
               disabled={!selectedDeviceId || syncMutation.isPending}
-              className="flex-1 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 shadow-medium transition-shadow duration-200 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
+              loading={syncMutation.isPending}
             >
-              {syncMutation.isPending ? 'Синхронизация...' : 'Синхронизировать'}
-            </button>
+              Синхронизировать
+            </Button>
+            {filteredEvents && filteredEvents.length > 0 && (
+              <Dropdown
+                trigger={
+                  <Button variant="outline" aria-label="Экспорт событий">
+                    <ArrowDownTrayIcon className="h-4 w-4 mr-2" aria-hidden="true" />
+                    Экспорт
+                    <ChevronDownIcon className="h-4 w-4 ml-2" aria-hidden="true" />
+                  </Button>
+                }
+                aria-label="Опции экспорта событий"
+              >
+                <DropdownItem onClick={() => exportToPDF(eventsData.events, 'События терминала', 'events')}>
+                  Экспорт в PDF
+                </DropdownItem>
+                <DropdownItem onClick={() => exportToExcel(eventsData.events, 'events')}>
+                  Экспорт в Excel
+                </DropdownItem>
+              </Dropdown>
+            )}
+          </div>
+
+          <div className="flex items-end gap-2">
+            {subscriptionStatus?.is_active ? (
+              <Button
+                variant="error"
+                onClick={handleUnsubscribe}
+                disabled={!selectedDeviceId || unsubscribeMutation.isPending}
+                loading={unsubscribeMutation.isPending}
+                className="flex-1"
+              >
+                Остановить подписку
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                onClick={handleSubscribe}
+                disabled={!selectedDeviceId || subscribeMutation.isPending}
+                loading={subscribeMutation.isPending}
+                className="flex-1"
+              >
+                Запустить подписку
+              </Button>
+            )}
+            {subscriptionStatus?.is_active && (
+              <Badge variant="success">Активна</Badge>
+            )}
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* Список событий */}
       {selectedDeviceId ? (
         isLoading ? (
-          <div className="bg-white shadow-card rounded-lg p-8 text-center border border-gray-100">
-            <div className="text-gray-500">Загрузка событий с терминала...</div>
-          </div>
-        ) : eventsData ? (
-          <div className="bg-white shadow-card rounded-lg overflow-hidden border border-gray-100">
-            <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
-              <div className="flex justify-between items-center">
-                <h2 className="text-lg font-semibold text-gray-900 tracking-tight">
-                  События ({eventsData.count || 0})
-                </h2>
-                {eventsData.period && (
-                  <div className="text-sm text-gray-500">
-                    Период: {new Date(eventsData.period.start_date).toLocaleDateString('ru-RU')} - {new Date(eventsData.period.end_date).toLocaleDateString('ru-RU')}
-                  </div>
-                )}
-              </div>
+          <Card>
+            <div className="space-y-4">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="flex items-center gap-4">
+                  <Skeleton className="h-4 w-12" />
+                  <Skeleton className="h-4 flex-1" />
+                  <Skeleton className="h-4 w-24" />
+                </div>
+              ))}
             </div>
+          </Card>
+        ) : eventsData ? (
+          <Card
+            title="События"
+            subtitle={eventsData.period ? `Период: ${formatDate(eventsData.period.start_date)} - ${formatDate(eventsData.period.end_date)}` : undefined}
+          >
 
-            {eventsData.events && eventsData.events.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Время
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        ID сотрудника
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Тип события
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Терминал
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {eventsData.events.map((event, index) => (
-                      <tr key={index} className="hover:bg-gray-50 transition-colors duration-150">
-                        <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {formatDateTime(event.timestamp)}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700 font-medium">
-                          {event.employee_no || 'N/A'}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm">
-                          {getEventTypeLabel(event.event_type)}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                          {event.terminal_ip || 'N/A'}
-                        </td>
+            {filteredEvents && filteredEvents.length > 0 ? (
+              <>
+                {/* Desktop table view */}
+                <div className="hidden lg:block">
+                {filteredEvents.length > 100 ? (
+                  <VirtualizedTable
+                    columns={[
+                      {
+                        key: 'no',
+                        label: 'No.',
+                        width: '5%',
+                        render: (_, event, index) => startIndex + index + 1,
+                      },
+                      {
+                        key: 'employee_no',
+                        label: 'Employee ID',
+                        width: '10%',
+                        sortable: true,
+                      },
+                      {
+                        key: 'name',
+                        label: 'Name',
+                        width: '15%',
+                        sortable: true,
+                      },
+                      {
+                        key: 'card_no',
+                        label: 'Card No.',
+                        width: '10%',
+                      },
+                      {
+                        key: 'card_reader_id',
+                        label: 'Card Reader ID',
+                        width: '10%',
+                      },
+                      {
+                        key: 'event_type',
+                        label: 'Event Types',
+                        width: '12%',
+                        render: (_, event) => (
+                          <Badge variant={event.event_type === 'entry' ? 'success' : event.event_type === 'exit' ? 'warning' : 'primary'}>
+                            {event.event_type_description || event.event_type || '--'}
+                          </Badge>
+                        ),
+                      },
+                      {
+                        key: 'timestamp',
+                        label: 'Time',
+                        width: '18%',
+                        sortable: true,
+                        render: (_, event) => formatDateTime(event.timestamp),
+                      },
+                      {
+                        key: 'remote_host_ip',
+                        label: 'Remote Host IP',
+                        width: '10%',
+                      },
+                      {
+                        key: 'operation',
+                        label: 'Operation',
+                        width: '10%',
+                        render: () => '--',
+                      },
+                    ]}
+                    data={paginatedEvents}
+                    height={600}
+                    itemSize={60}
+                    aria-label="Список событий"
+                  />
+                ) : (
+                  <div className="overflow-x-auto">
+                  <table 
+                    className="min-w-full divide-y divide-gray-200"
+                    role="table"
+                    aria-label="Список событий терминала"
+                  >
+                    <caption className="sr-only">Таблица событий доступа с терминалов</caption>
+                    <thead className="bg-gray-50">
+                      <tr role="row">
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          No.
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Employee ID
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Name
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Card No.
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Card Reader ID
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Event Types
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Time
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Remote Host IP
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Operation
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200" role="rowgroup">
+                      {paginatedEvents.map((event, index) => (
+                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-150" role="row">
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                            {startIndex + index + 1}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.employee_no || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.name || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.card_no || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.card_reader_id || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.event_type_description || event.event_type || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {formatDateTime(event.timestamp)}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                            {event.remote_host_ip || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                            {/* Иконки для операций можно добавить здесь */}
+                            --
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                )}
+                </div>
+
+                {/* Mobile card view */}
+                <div className="lg:hidden space-y-3">
+                  {paginatedEvents.map((event, index) => (
+                    <motion.div
+                      key={index}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2, delay: index * 0.03 }}
+                      className="bg-white border border-gray-200 rounded-lg p-4 shadow-soft hover:shadow-medium transition-shadow duration-150"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-gray-500">#{startIndex + index + 1}</span>
+                          <Badge variant={event.event_type === 'entry' ? 'success' : event.event_type === 'exit' ? 'warning' : 'primary'}>
+                            {event.event_type_description || event.event_type || '--'}
+                          </Badge>
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">{event.name || '--'}</p>
+                          <p className="text-xs text-gray-500 mt-0.5">ID: {event.employee_no || '--'}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div>
+                            <span className="text-gray-500">Карта:</span>
+                            <span className="ml-1 text-gray-700 font-medium">{event.card_no || '--'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Считыватель:</span>
+                            <span className="ml-1 text-gray-700 font-medium">{event.card_reader_id || '--'}</span>
+                          </div>
+                          <div className="col-span-2">
+                            <span className="text-gray-500">Время:</span>
+                            <span className="ml-1 text-gray-700 font-medium">{formatDateTime(event.timestamp)}</span>
+                          </div>
+                          {event.remote_host_ip && (
+                            <div className="col-span-2">
+                              <span className="text-gray-500">IP:</span>
+                              <span className="ml-1 text-gray-700 font-medium">{event.remote_host_ip}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+
+                {/* Пагинация */}
+                <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <span className="text-sm text-gray-700">
+                      Total: {totalEvents}
+                    </span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => {
+                        setPageSize(parseInt(e.target.value));
+                        setCurrentPage(1);
+                      }}
+                      className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)]"
+                    >
+                      <option value={24}>24</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-100"
+                    >
+                      &lt;
+                    </button>
+                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                      let pageNum;
+                      if (totalPages <= 5) {
+                        pageNum = i + 1;
+                      } else if (currentPage <= 3) {
+                        pageNum = i + 1;
+                      } else if (currentPage >= totalPages - 2) {
+                        pageNum = totalPages - 4 + i;
+                      } else {
+                        pageNum = currentPage - 2 + i;
+                      }
+                      return (
+                        <button
+                          key={pageNum}
+                          onClick={() => setCurrentPage(pageNum)}
+                          className={`px-3 py-1 border rounded-md text-sm ${
+                            currentPage === pageNum
+                              ? 'bg-[rgb(19,91,147)] text-white border-[rgb(19,91,147)]'
+                              : 'border-gray-300 hover:bg-gray-100'
+                          }`}
+                        >
+                          {pageNum}
+                        </button>
+                      );
+                    })}
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                      disabled={currentPage === totalPages}
+                      className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-100"
+                    >
+                      &gt;
+                    </button>
+                    <div className="flex items-center gap-2 ml-4">
+                      <input
+                        type="number"
+                        min="1"
+                        max={totalPages}
+                        value={currentPage}
+                        onChange={(e) => {
+                          const page = parseInt(e.target.value);
+                          if (page >= 1 && page <= totalPages) {
+                            setCurrentPage(page);
+                          }
+                        }}
+                        className="w-16 px-2 py-1 border border-gray-300 rounded-md text-sm text-center focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)]"
+                      />
+                      <span className="text-sm text-gray-700">/ {totalPages}</span>
+                      <button
+                        onClick={() => {
+                          const page = parseInt(prompt(`Перейти на страницу (1-${totalPages}):`, currentPage) || currentPage);
+                          if (page >= 1 && page <= totalPages) {
+                            setCurrentPage(page);
+                          }
+                        }}
+                        className="px-3 py-1 bg-[rgb(19,91,147)] text-white rounded-md text-sm hover:bg-[rgb(30,120,180)]"
+                      >
+                        Go
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
             ) : (
-              <div className="px-4 py-8 text-center text-gray-500">
-                События не найдены за выбранный период
-              </div>
+              <EmptyState
+                icon={CalendarIcon}
+                title="События не найдены"
+                description="За выбранный период событий не найдено"
+              />
             )}
-          </div>
+          </Card>
         ) : (
-          <div className="bg-white shadow-card rounded-lg p-8 text-center border border-gray-100">
-            <div className="text-red-500">Ошибка загрузки событий с терминала</div>
-          </div>
+          <Card>
+            <div className="text-red-500 text-center py-8">Ошибка загрузки событий с терминала</div>
+          </Card>
         )
       ) : (
-        <div className="bg-white shadow-card rounded-lg p-8 text-center border border-gray-100">
-          <div className="text-gray-400">Выберите устройство для просмотра событий</div>
-        </div>
+        <Card>
+          <EmptyState
+            icon={CalendarIcon}
+            title="Выберите устройство"
+            description="Выберите устройство для просмотра событий"
+          />
+        </Card>
       )}
+
+      {/* Confirm dialogs */}
+      <ConfirmDialog
+        isOpen={syncConfirm}
+        onClose={() => setSyncConfirm(false)}
+        onConfirm={() => {
+          syncMutation.mutate();
+          setSyncConfirm(false);
+        }}
+        title="Синхронизация событий"
+        message="Синхронизировать события с терминала в базу данных?"
+        confirmText="Синхронизировать"
+        cancelText="Отмена"
+        variant="info"
+      />
+
+      <ConfirmDialog
+        isOpen={subscribeConfirm}
+        onClose={() => setSubscribeConfirm(false)}
+        onConfirm={() => {
+          subscribeMutation.mutate();
+          setSubscribeConfirm(false);
+        }}
+        title="Подписка на события"
+        message="Запустить подписку на события в реальном времени?"
+        confirmText="Запустить"
+        cancelText="Отмена"
+        variant="info"
+      />
+
+      <ConfirmDialog
+        isOpen={unsubscribeConfirm}
+        onClose={() => setUnsubscribeConfirm(false)}
+        onConfirm={() => {
+          unsubscribeMutation.mutate();
+          setUnsubscribeConfirm(false);
+        }}
+        title="Остановка подписки"
+        message="Остановить подписку на события?"
+        confirmText="Остановить"
+        cancelText="Отмена"
+        variant="warning"
+      />
     </div>
   );
 };
 
 export default EventsPage;
-
-

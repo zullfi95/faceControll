@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import showToast from '../utils/toast';
 
 const FacePhotoUpload = ({ onPhotoSelect, currentPhoto }) => {
   const [preview, setPreview] = useState(currentPhoto || null);
@@ -9,13 +10,13 @@ const FacePhotoUpload = ({ onPhotoSelect, currentPhoto }) => {
 
     // Проверка типа файла
     if (!file.type.startsWith('image/')) {
-      alert('Пожалуйста, выберите изображение');
+      showToast.warning('Пожалуйста, выберите изображение');
       return;
     }
 
     // Проверка размера (макс 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      alert('Размер файла не должен превышать 5MB');
+      showToast.warning('Размер файла не должен превышать 5MB');
       return;
     }
 
@@ -61,8 +62,8 @@ const FacePhotoUpload = ({ onPhotoSelect, currentPhoto }) => {
       <div
         className={`border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors ${
           isDragging
-            ? 'border-indigo-500 bg-indigo-50'
-            : 'border-gray-300 hover:border-indigo-400'
+            ? 'border-[rgb(19,91,147)] bg-[rgb(235,245,252)]'
+            : 'border-gray-300 hover:border-[rgb(19,91,147)]'
         }`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -94,7 +95,7 @@ const FacePhotoUpload = ({ onPhotoSelect, currentPhoto }) => {
               />
             </svg>
             <div className="text-sm text-gray-600">
-              <span className="font-medium text-indigo-600 hover:text-indigo-500">
+              <span className="font-medium text-[rgb(19,91,147)] hover:text-[rgb(30,120,180)]">
                 Загрузите файл
               </span>{' '}
               или перетащите сюда

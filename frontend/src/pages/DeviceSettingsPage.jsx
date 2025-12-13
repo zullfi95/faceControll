@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
+import Button from '../components/ui/Button';
+import Card from '../components/ui/Card';
+import Input from '../components/ui/Input';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import Badge from '../components/ui/Badge';
+import Skeleton from '../components/ui/Skeleton';
+import showToast from '../utils/toast';
 
 const DeviceSettingsPage = () => {
   const queryClient = useQueryClient();
@@ -48,21 +55,21 @@ const DeviceSettingsPage = () => {
   });
 
   // Перезагрузка устройства
+  const [rebootConfirm, setRebootConfirm] = useState(false);
+
   const rebootMutation = useMutation({
     mutationFn: (deviceId) => axios.post(`/api/devices/${deviceId}/reboot`),
     onSuccess: () => {
-      alert('Команда перезагрузки отправлена! Устройство перезагрузится через несколько секунд.');
+      showToast.success('Команда перезагрузки отправлена! Устройство перезагрузится через несколько секунд.');
     },
     onError: (error) => {
-      alert('Ошибка: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка: ' + (error.response?.data?.detail || error.message));
     }
   });
 
   const handleReboot = () => {
     if (!devices || devices.length === 0) return;
-    if (window.confirm('Вы уверены, что хотите перезагрузить устройство? Это может занять несколько минут.')) {
-      rebootMutation.mutate(devices[0].id);
-    }
+    setRebootConfirm(true);
   };
 
   // Создание устройства
@@ -72,10 +79,10 @@ const DeviceSettingsPage = () => {
       queryClient.invalidateQueries(['devices']);
       setIsAddingDevice(false);
       setNewDevice({ name: '', ip_address: '', username: 'admin', password: '' });
-      alert('Устройство успешно добавлено!');
+      showToast.success('Устройство успешно добавлено!');
     },
     onError: (error) => {
-      alert('Ошибка: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка: ' + (error.response?.data?.detail || error.message));
     }
   });
 
@@ -91,10 +98,10 @@ const DeviceSettingsPage = () => {
       queryClient.invalidateQueries(['devices']);
       setIsEditingDevice(false);
       setEditingDeviceData(null);
-      alert('Устройство успешно обновлено!');
+      showToast.success('Устройство успешно обновлено!');
     },
     onError: (error) => {
-      alert('Ошибка: ' + (error.response?.data?.detail || error.message));
+      showToast.error('Ошибка: ' + (error.response?.data?.detail || error.message));
     }
   });
 
@@ -131,21 +138,36 @@ const DeviceSettingsPage = () => {
   const videoAudio = features.video_audio || {};
   const other = features.other || {};
 
-  if (isLoading) return <div className="p-8">Загрузка...</div>;
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-8 w-64" />
+        <Card>
+          <div className="space-y-4">
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-4 w-1/2" />
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">Настройки устройства</h1>
-        <p className="mt-1 text-sm text-gray-600">
+    <div role="main">
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold text-gray-900" id="device-settings-title">
+          Настройки устройства
+        </h1>
+        <p className="mt-1 text-sm text-gray-600" id="device-settings-description">
           Конфигурация терминала DS-K1T343EFWX для управления через ISAPI
         </p>
-      </div>
+      </header>
 
       {/* Текущее устройство */}
       {devices && devices.length > 0 ? (
-        <div className="bg-white shadow-card sm:rounded-lg mb-6 border border-gray-100">
-          <div className="px-4 py-5 sm:p-6">
+        <Card className="mb-6">
+          <div>
             <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
               {devices[0].name}
             </h3>
@@ -162,18 +184,24 @@ const DeviceSettingsPage = () => {
               <div>
                 <dt className="text-sm font-medium text-gray-500">Статус</dt>
                 <dd className="mt-1">
-                  <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                    devices[0].is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}>
+                  <Badge variant={devices[0].is_active ? 'success' : 'error'}>
                     {devices[0].is_active ? 'Активно' : 'Неактивно'}
-                  </span>
+                  </Badge>
                 </dd>
               </div>
               <div>
                 <dt className="text-sm font-medium text-gray-500">Последняя синхронизация</dt>
                 <dd className="mt-1 text-sm text-gray-900">
                   {devices[0].last_sync 
-                    ? new Date(devices[0].last_sync).toLocaleString('ru-RU')
+                    ? new Date(devices[0].last_sync).toLocaleString('ru-RU', {
+                        timeZone: 'Asia/Baku',
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                      })
                     : 'Никогда'}
                 </dd>
               </div>
@@ -182,28 +210,23 @@ const DeviceSettingsPage = () => {
             {/* Проверка соединения */}
             <div className="mt-6 border-t pt-4">
               <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => checkStatus()}
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
-                >
+                <Button onClick={() => checkStatus()}>
                   Проверить соединение
-                </button>
+                </Button>
                 
-                <button
-                  onClick={startEditing}
-                  className="bg-yellow-600 text-white px-4 py-2 rounded-md hover:bg-yellow-700 shadow-medium transition-shadow duration-200 font-medium"
-                >
+                <Button variant="warning" onClick={startEditing}>
                   Редактировать
-                </button>
+                </Button>
 
                 {deviceStatus?.connected && supportedFeatures?.features?.system?.reboot && (
-                  <button
+                  <Button
+                    variant="error"
                     onClick={handleReboot}
                     disabled={rebootMutation.isPending}
-                    className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-medium transition-shadow duration-200 font-medium"
+                    loading={rebootMutation.isPending}
                   >
-                    {rebootMutation.isPending ? 'Перезагрузка...' : 'Перезагрузить устройство'}
-                  </button>
+                    Перезагрузить устройство
+                  </Button>
                 )}
               </div>
 
@@ -455,169 +478,144 @@ const DeviceSettingsPage = () => {
               </div>
             )}
           </div>
-        </div>
+        </Card>
       ) : (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4 mb-6">
-          <p className="text-sm text-yellow-700">
-            Устройство не настроено. Добавьте терминал для управления пользователями.
-          </p>
-        </div>
+        <Card className="mb-6">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
+            <p className="text-sm text-yellow-700">
+              Устройство не настроено. Добавьте терминал для управления пользователями.
+            </p>
+          </div>
+        </Card>
       )}
 
       {/* Редактирование устройства */}
       {isEditingDevice && editingDeviceData && (
-        <div className="bg-white shadow-card sm:rounded-lg mb-6 border border-gray-100">
-          <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
-              Редактирование устройства
-            </h3>
-            <form onSubmit={handleUpdateSubmit}>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Название</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={editingDeviceData.name}
-                    onChange={(e) => setEditingDeviceData({...editingDeviceData, name: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">IP адрес</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={editingDeviceData.ip_address}
-                    onChange={(e) => setEditingDeviceData({...editingDeviceData, ip_address: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Имя пользователя</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={editingDeviceData.username}
-                    onChange={(e) => setEditingDeviceData({...editingDeviceData, username: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Новый пароль</label>
-                  <input
-                    type="password"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={editingDeviceData.password}
-                    onChange={(e) => setEditingDeviceData({...editingDeviceData, password: e.target.value})}
-                    placeholder="Введите пароль от терминала"
-                  />
-                </div>
-              </div>
-              <div className="mt-6 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsEditingDevice(false);
-                    setEditingDeviceData(null);
-                  }}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
-                >
-                  Отмена
-                </button>
-                <button
-                  type="submit"
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
-                >
-                  Обновить
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <Card className="mb-6" title="Редактирование устройства">
+          <form onSubmit={handleUpdateSubmit}>
+            <div className="space-y-4">
+              <Input
+                label="Название"
+                type="text"
+                required
+                value={editingDeviceData.name}
+                onChange={(e) => setEditingDeviceData({...editingDeviceData, name: e.target.value})}
+              />
+              <Input
+                label="IP адрес"
+                type="text"
+                required
+                value={editingDeviceData.ip_address}
+                onChange={(e) => setEditingDeviceData({...editingDeviceData, ip_address: e.target.value})}
+              />
+              <Input
+                label="Имя пользователя"
+                type="text"
+                required
+                value={editingDeviceData.username}
+                onChange={(e) => setEditingDeviceData({...editingDeviceData, username: e.target.value})}
+              />
+              <Input
+                label="Новый пароль"
+                type="password"
+                required
+                value={editingDeviceData.password}
+                onChange={(e) => setEditingDeviceData({...editingDeviceData, password: e.target.value})}
+                placeholder="Введите пароль от терминала"
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => {
+                  setIsEditingDevice(false);
+                  setEditingDeviceData(null);
+                }}
+              >
+                Отмена
+              </Button>
+              <Button type="submit" loading={updateMutation.isPending}>
+                Обновить
+              </Button>
+            </div>
+          </form>
+        </Card>
       )}
 
       {/* Добавление нового устройства */}
       {!isAddingDevice && (!devices || devices.length === 0) && (
-        <button
-          onClick={() => setIsAddingDevice(true)}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
-        >
+        <Button onClick={() => setIsAddingDevice(true)}>
           Добавить устройство
-        </button>
+        </Button>
       )}
 
       {isAddingDevice && (
-        <div className="bg-white shadow-card sm:rounded-lg border border-gray-100">
-          <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
-              Новое устройство
-            </h3>
-            <form onSubmit={handleSubmit}>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Название</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={newDevice.name}
-                    onChange={(e) => setNewDevice({...newDevice, name: e.target.value})}
-                    placeholder="Например: Терминал Вход"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">IP адрес (в VPN сети)</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={newDevice.ip_address}
-                    onChange={(e) => setNewDevice({...newDevice, ip_address: e.target.value})}
-                    placeholder="10.0.0.100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Имя пользователя</label>
-                  <input
-                    type="text"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={newDevice.username}
-                    onChange={(e) => setNewDevice({...newDevice, username: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Пароль</label>
-                  <input
-                    type="password"
-                    required
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2 border"
-                    value={newDevice.password}
-                    onChange={(e) => setNewDevice({...newDevice, password: e.target.value})}
-                  />
-                </div>
-              </div>
-              <div className="mt-6 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAddingDevice(false)}
-                  className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 shadow-soft transition-shadow duration-200 font-medium"
-                >
-                  Отмена
-                </button>
-                <button
-                  type="submit"
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-medium transition-shadow duration-200 font-medium"
-                >
-                  Сохранить
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <Card title="Новое устройство">
+          <form onSubmit={handleSubmit}>
+            <div className="space-y-4">
+              <Input
+                label="Название"
+                type="text"
+                required
+                value={newDevice.name}
+                onChange={(e) => setNewDevice({...newDevice, name: e.target.value})}
+                placeholder="Например: Терминал Вход"
+              />
+              <Input
+                label="IP адрес (в VPN сети)"
+                type="text"
+                required
+                value={newDevice.ip_address}
+                onChange={(e) => setNewDevice({...newDevice, ip_address: e.target.value})}
+                placeholder="10.0.0.100"
+              />
+              <Input
+                label="Имя пользователя"
+                type="text"
+                required
+                value={newDevice.username}
+                onChange={(e) => setNewDevice({...newDevice, username: e.target.value})}
+              />
+              <Input
+                label="Пароль"
+                type="password"
+                required
+                value={newDevice.password}
+                onChange={(e) => setNewDevice({...newDevice, password: e.target.value})}
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => setIsAddingDevice(false)}
+              >
+                Отмена
+              </Button>
+              <Button type="submit" loading={createMutation.isPending}>
+                Сохранить
+              </Button>
+            </div>
+          </form>
+        </Card>
       )}
+
+      <ConfirmDialog
+        isOpen={rebootConfirm}
+        onClose={() => setRebootConfirm(false)}
+        onConfirm={() => {
+          if (devices && devices.length > 0) {
+            rebootMutation.mutate(devices[0].id);
+          }
+          setRebootConfirm(false);
+        }}
+        title="Перезагрузка устройства"
+        message="Вы уверены, что хотите перезагрузить устройство? Это может занять несколько минут."
+        confirmText="Перезагрузить"
+        cancelText="Отмена"
+        variant="warning"
+      />
 
       {/* Инструкция */}
       <div className="mt-6 bg-blue-50 border border-blue-200 rounded-md p-4">
