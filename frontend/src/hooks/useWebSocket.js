@@ -13,8 +13,8 @@ export const useWebSocket = (url, options = {}) => {
     onConnect,
     onDisconnect,
     onError,
-    reconnectInterval = 5000,
-    maxReconnectAttempts = 5,
+    reconnectInterval = 10000,
+    maxReconnectAttempts = 3,
     enabled = true
   } = options;
 
@@ -23,14 +23,26 @@ export const useWebSocket = (url, options = {}) => {
       return;
     }
 
+    // Не пытаемся подключиться, если уже достигли лимита попыток
+    if (reconnectAttempts.current > maxReconnectAttempts) {
+      return;
+    }
+
     try {
       const ws = new WebSocket(url);
 
       ws.onopen = () => {
-        console.log('WebSocket connected to:', url);
         setIsConnected(true);
         setError(null);
         reconnectAttempts.current = 0;
+        
+        // Отправляем начальное сообщение для подтверждения готовности
+        try {
+          ws.send(JSON.stringify({ type: 'connected' }));
+        } catch (e) {
+          // Тихая обработка ошибки
+        }
+        
         onConnect?.();
       };
 
@@ -40,18 +52,30 @@ export const useWebSocket = (url, options = {}) => {
           
           // Игнорируем ping сообщения (они используются для поддержания соединения)
           if (message.type === 'ping') {
+            // Отправляем pong в ответ на ping для поддержания соединения
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              try {
+                wsRef.current.send(JSON.stringify({ type: 'pong' }));
+              } catch (e) {
+                // Тихая обработка ошибки
+              }
+            }
+            return;
+          }
+          
+          // Игнорируем служебные сообщения connected
+          if (message.type === 'connected') {
             return;
           }
           
           setLastMessage(message);
           onMessage?.(message);
         } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
+          // Тихая обработка ошибок парсинга
         }
       };
 
       ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', url, 'code:', event.code, 'reason:', event.reason || 'none', 'wasClean:', event.wasClean);
         setIsConnected(false);
         onDisconnect?.(event);
 
@@ -59,27 +83,35 @@ export const useWebSocket = (url, options = {}) => {
         // Код 1000 = нормальное закрытие, 1001 = уход со страницы, не переподключаемся
         if (enabled && event.code !== 1000 && event.code !== 1001 && reconnectAttempts.current < maxReconnectAttempts) {
           reconnectAttempts.current += 1;
-          console.log(`WebSocket reconnecting in ${reconnectInterval}ms (attempt ${reconnectAttempts.current}/${maxReconnectAttempts})`);
-
           reconnectTimeoutRef.current = setTimeout(() => {
             connect();
           }, reconnectInterval);
         } else if (reconnectAttempts.current >= maxReconnectAttempts) {
-          console.error('WebSocket max reconnection attempts reached');
+          reconnectAttempts.current = maxReconnectAttempts + 1;
         }
       };
 
       ws.onerror = (event) => {
-        console.error('WebSocket error:', url, event);
-        // Дополнительная информация об ошибке будет доступна в onclose
         setError(event);
         onError?.(event);
       };
 
       wsRef.current = ws;
     } catch (err) {
-      console.error('Failed to create WebSocket connection:', err);
       setError(err);
+      
+      // Если достигли лимита попыток, не пытаемся больше
+      if (reconnectAttempts.current >= maxReconnectAttempts) {
+        return;
+      }
+      
+      // Планируем переподключение только если не достигли лимита
+      if (enabled && reconnectAttempts.current < maxReconnectAttempts) {
+        reconnectAttempts.current += 1;
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, reconnectInterval);
+      }
     }
   }, [url, enabled, onConnect, onDisconnect, onError, onMessage, reconnectInterval, maxReconnectAttempts]);
 
@@ -107,9 +139,15 @@ export const useWebSocket = (url, options = {}) => {
 
   useEffect(() => {
     if (enabled) {
+      // Сбрасываем счетчик попыток при включении
+      if (reconnectAttempts.current > maxReconnectAttempts) {
+        reconnectAttempts.current = 0;
+      }
       connect();
     } else {
       disconnect();
+      // Сбрасываем счетчик при отключении
+      reconnectAttempts.current = 0;
     }
 
     return () => {
@@ -141,4 +179,4 @@ export const useReportsWebSocket = (options = {}) => {
 export const useDashboardWebSocket = (options = {}) => {
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws/dashboard`;
   return useWebSocket(wsUrl, options);
-};
+}

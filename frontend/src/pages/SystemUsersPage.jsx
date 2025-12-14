@@ -339,6 +339,7 @@ function SystemUsersPage() {
             <Input
               label={`Пароль ${editingUser ? '(оставьте пустым, чтобы не менять)' : ''}`}
               type="password"
+              autoComplete={editingUser ? "new-password" : "new-password"}
               required={!editingUser}
               value={formData.password}
               onChange={(e) => setFormData({ ...formData, password: e.target.value })}

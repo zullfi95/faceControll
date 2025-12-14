@@ -15,7 +15,6 @@ async def parse_multipart_event(request: Request) -> Optional[Dict[str, Any]]:
         content_type = request.headers.get("content-type", "")
         
         if not content_type or "multipart/form-data" not in content_type:
-            logger.warning(f"[PARSE_MULTIPART] Unexpected content-type: '{content_type}'")
             return None
         
         # Пробуем использовать request.form() для multipart данных
@@ -33,8 +32,7 @@ async def parse_multipart_event(request: Request) -> Optional[Dict[str, Any]]:
                         field_content = await value.read()
                         if isinstance(field_content, bytes):
                             field_content = field_content.decode('utf-8', errors='ignore')
-                    except Exception as read_error:
-                        logger.warning(f"[PARSE_MULTIPART] Failed to read file field '{key}': {read_error}")
+                    except Exception:
                         continue
                 else:
                     continue
@@ -61,8 +59,7 @@ async def parse_multipart_event(request: Request) -> Optional[Dict[str, Any]]:
             if event_data_from_form:
                 return event_data_from_form
                 
-        except Exception as form_error:
-            logger.warning(f"[PARSE_MULTIPART] Failed to parse as form: {form_error}")
+        except Exception:
             if event_data_from_form:
                 return event_data_from_form
             return None
@@ -85,7 +82,6 @@ async def parse_json_event(request: Request) -> Optional[Dict[str, Any]]:
             return {"AccessControllerEvent": body}
         
         return None
-    except Exception as e:
-        logger.warning(f"[PARSE_JSON] Failed to parse JSON event: {e}")
+    except Exception:
         return None
 

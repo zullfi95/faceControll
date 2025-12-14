@@ -1626,23 +1626,52 @@ async def get_daily_report(date_str: str, db: AsyncSession = Depends(database.ge
         raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 
-@app.websocket("/ws/events")
+@app.websocket("/api/ws/events")
 async def websocket_events(websocket: WebSocket):
     """WebSocket для обновлений событий в реальном времени."""
     try:
         await websocket_manager.connect(websocket, "events")
+        
+        # Упрощенная логика - просто поддерживаем соединение
         try:
+            # Отправляем начальное приветствие сразу при подключении
+            try:
+                await websocket.send_json({"type": "connected", "status": "ok"})
+            except Exception:
+                pass
+
             while True:
-                # Поддерживаем соединение активным
-                # Используем receive_text() с таймаутом или ping/pong для поддержания соединения
                 try:
-                    data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-                    # Можно добавить обработку команд от клиента
+                    # Ждем сообщения от клиента с таймаутом
+                    message = await asyncio.wait_for(websocket.receive(), timeout=60.0)
+
+                    if message["type"] == "websocket.receive":
+                        try:
+                            data = message["text"]
+                            message_data = json.loads(data)
+                            message_type = message_data.get("type")
+
+                            # Обрабатываем pong сообщения
+                            if message_type == "pong":
+                                continue
+
+                        except (json.JSONDecodeError, Exception):
+                            # Тихая обработка некорректных сообщений
+                            pass
+
+                    elif message["type"] == "websocket.disconnect":
+                        break
+
                 except asyncio.TimeoutError:
                     # Отправляем ping для поддержания соединения
-                    await websocket.send_json({"type": "ping"})
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except Exception:
+                        # Соединение закрыто
+                        break
         except WebSocketDisconnect:
-            logger.info("WebSocket client disconnected from events channel")
+            # Нормальное отключение
+            pass
         except Exception as e:
             logger.error(f"Error in WebSocket events handler: {e}", exc_info=True)
         finally:
@@ -1654,7 +1683,7 @@ async def websocket_events(websocket: WebSocket):
         except:
             pass
 
-@app.websocket("/ws/reports")
+@app.websocket("/api/ws/reports")
 async def websocket_reports(websocket: WebSocket):
     """WebSocket для обновлений отчетов в реальном времени."""
     try:
@@ -1666,7 +1695,7 @@ async def websocket_reports(websocket: WebSocket):
                 except asyncio.TimeoutError:
                     await websocket.send_json({"type": "ping"})
         except WebSocketDisconnect:
-            logger.info("WebSocket client disconnected from reports channel")
+            pass
         except Exception as e:
             logger.error(f"Error in WebSocket reports handler: {e}", exc_info=True)
         finally:
@@ -1690,7 +1719,7 @@ async def websocket_dashboard(websocket: WebSocket):
                 except asyncio.TimeoutError:
                     await websocket.send_json({"type": "ping"})
         except WebSocketDisconnect:
-            logger.info("WebSocket client disconnected from dashboard channel")
+            pass
         except Exception as e:
             logger.error(f"Error in WebSocket dashboard handler: {e}", exc_info=True)
         finally:
@@ -2032,31 +2061,18 @@ async def sync_device_events(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
-        logger.info(f"[SYNC_EVENTS] ===== STARTING EVENT SYNC =====")
-        logger.info(f"[SYNC_EVENTS] Step 1: Device ID: {device_id}, Name: {device.name}, IP: {device.ip_address}")
-        logger.info(f"[SYNC_EVENTS] Step 1: Period: {start_datetime} to {end_datetime}")
-        logger.info(f"[SYNC_EVENTS] Step 1: Max records: 1000")
-
-        logger.info(f"[SYNC_EVENTS] Step 2: Fetching events from terminal...")
         # Получаем события с терминала
         attendance_records = await client.get_attendance_records(
             start_time=start_datetime,
             end_time=end_datetime,
             max_records=1000
         )
-        logger.info(f"[SYNC_EVENTS] Step 2: Received {len(attendance_records) if attendance_records else 0} events from terminal")
-        
-        if attendance_records and len(attendance_records) > 0:
-            logger.info(f"[SYNC_EVENTS] Step 2: First event sample: {json.dumps(attendance_records[0], indent=2, default=str)}")
 
         synced_count = 0
         skipped_count = 0
 
-        logger.info(f"[SYNC_EVENTS] Step 3: Processing {len(attendance_records) if attendance_records else 0} events...")
         # Сохраняем события в базу данных
         for i, record in enumerate(attendance_records or []):
-            logger.info(f"[SYNC_EVENTS] Step 3.{i+1}: Processing event {i+1}/{len(attendance_records)}")
-            logger.debug(f"[SYNC_EVENTS] Step 3.{i+1}: Event data: {json.dumps(record, indent=2, default=str)}")
             try:
                 # Проверяем, существует ли уже такое событие (по employee_no, timestamp, event_type_code)
                 existing_event = await db.execute(
@@ -2087,17 +2103,14 @@ async def sync_device_events(
                     "remote_host_ip": record.get("remote_host_ip")
                 }
 
-                logger.info(f"[SYNC_EVENTS] Step 3.{i+1}.1: Creating event in database...")
                 event = await crud.create_event(db, schemas_internal.InternalEventCreate(**event_data))
                 if event:
                     synced_count += 1
-                    logger.info(f"[SYNC_EVENTS] Step 3.{i+1}.2: Event saved successfully (ID: {event.id}, total synced: {synced_count})")
                 else:
-                    logger.warning(f"[SYNC_EVENTS] Step 3.{i+1}.2: Failed to create event for user {record.get('employee_no')}")
                     skipped_count += 1
 
             except Exception as e:
-                logger.warning(f"[SYNC_EVENTS] Step 3.{i+1}: Error processing attendance record: {e}")
+                skipped_count += 1
                 logger.warning(f"[SYNC_EVENTS] Step 3.{i+1}: Record data: {json.dumps(record, indent=2, default=str)}")
                 skipped_count += 1
                 continue
@@ -2129,100 +2142,6 @@ async def sync_device_events(
         logger.error(f"Error syncing events from device {device_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error syncing events: {str(e)}")
 
-@app.post("/devices/{device_id}/events/subscribe")
-async def subscribe_to_device_events(
-    device_id: int,
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Запуск подписки на события в реальном времени для устройства.
-    
-    Args:
-        device_id: ID устройства
-    
-    Returns:
-        Статус подписки
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = get_device_password_safe(device, device.id)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Проверка соединения
-        connected, error_msg = await client.check_connection()
-        if not connected:
-            raise HTTPException(status_code=503, detail=f"Device is not accessible: {error_msg}")
-        
-        # Запускаем подписку (передаем функцию для получения новой сессии БД)
-        success = await event_service.start_device_subscription(device_id, client, database.get_db)
-        
-        if success:
-            return {
-                "success": True,
-                "message": f"Subscription started for device {device_id}",
-                "device_id": device_id,
-                "device_name": device.name
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to start subscription")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error starting subscription for device {device_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.post("/devices/{device_id}/events/unsubscribe")
-async def unsubscribe_from_device_events(device_id: int):
-    """
-    Остановка подписки на события для устройства.
-    
-    Args:
-        device_id: ID устройства
-    
-    Returns:
-        Статус отписки
-    """
-    try:
-        success = await event_service.stop_device_subscription(device_id)
-        
-        if success:
-            return {
-                "success": True,
-                "message": f"Subscription stopped for device {device_id}",
-                "device_id": device_id
-            }
-        else:
-            return {
-                "success": False,
-                "message": f"No active subscription found for device {device_id}",
-                "device_id": device_id
-            }
-            
-    except Exception as e:
-        logger.error(f"Error stopping subscription for device {device_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/devices/{device_id}/events/subscription-status")
-async def get_subscription_status(device_id: int):
-    """
-    Получение статуса подписки на события для устройства.
-    
-    Args:
-        device_id: ID устройства
-    
-    Returns:
-        Статус подписки
-    """
-    is_active = event_service.is_subscription_active(device_id)
-    return {
-        "device_id": device_id,
-        "is_active": is_active,
-        "status": "active" if is_active else "inactive"
-    }
 
 @app.get("/devices/{device_id}/events/types")
 async def get_event_types(device_id: int, db: AsyncSession = Depends(database.get_db)):
@@ -2422,7 +2341,6 @@ async def receive_webhook_event(
         if WEBHOOK_API_KEY:
             if x_api_key:
                 if x_api_key != WEBHOOK_API_KEY:
-                    logger.warning(f"[WEBHOOK] Invalid API key from {request.client.host if request.client else 'unknown'}")
                     raise HTTPException(status_code=401, detail="Invalid API key")
         
         terminal_ip = request.client.host if request.client else "unknown"
@@ -2430,20 +2348,16 @@ async def receive_webhook_event(
         event_data = None
         try:
             event_data = await parse_multipart_event(request)
-        except Exception as e:
-            logger.error(f"[WEBHOOK] Error in parse_multipart_event: {e}", exc_info=True)
+        except Exception:
             event_data = None
         
         if not event_data:
             try:
                 event_data = await parse_json_event(request)
-            except Exception as e:
-                logger.error(f"[WEBHOOK] Error in parse_json_event: {e}", exc_info=True)
+            except Exception:
                 event_data = None
         
         if not event_data:
-            content_type = request.headers.get('content-type', 'unknown')
-            logger.warning(f"[WEBHOOK] Could not parse event. Content-Type: {content_type}")
             return {
                 "status": "received", 
                 "message": "Event format not recognized"
@@ -2454,14 +2368,12 @@ async def receive_webhook_event(
             temp_client = HikvisionClient("dummy", "dummy", "dummy")
             parsed_event = temp_client._parse_access_event(event_data)
         except Exception as parse_error:
-            logger.error(f"[WEBHOOK] Error parsing event: {parse_error}", exc_info=True)
             return {
                 "status": "received",
                 "message": f"Error parsing event: {str(parse_error)}"
             }
         
         if not parsed_event:
-            logger.warning(f"[WEBHOOK] Could not parse event data")
             return {
                 "status": "received",
                 "message": "Event parsed but no data extracted"
@@ -2470,7 +2382,6 @@ async def receive_webhook_event(
         try:
             parsed_event["terminal_ip"] = terminal_ip
         except Exception as set_ip_error:
-            logger.error(f"[WEBHOOK] Error setting terminal_ip: {set_ip_error}", exc_info=True)
             return {
                 "status": "received",
                 "message": f"Error setting terminal_ip: {str(set_ip_error)}"
@@ -2483,8 +2394,7 @@ async def receive_webhook_event(
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.replace(tzinfo=timezone.utc)
                 timestamp = timestamp.astimezone(timezone.utc)
-            except Exception as ts_error:
-                logger.warning(f"[WEBHOOK] Error parsing timestamp: {ts_error}")
+            except Exception:
                 timestamp = datetime.now(timezone.utc)
         elif isinstance(timestamp, datetime):
             if timestamp.tzinfo is None:
@@ -2509,7 +2419,6 @@ async def receive_webhook_event(
                 remote_host_ip=parsed_event.get("remote_host_ip")
             )
         except Exception as create_error:
-            logger.error(f"[WEBHOOK] Error creating event object: {create_error}", exc_info=True)
             return {
                 "status": "received",
                 "message": f"Error creating event object: {str(create_error)}"
@@ -2517,7 +2426,6 @@ async def receive_webhook_event(
 
         try:
             db_event = await crud.create_event(db, internal_event)
-            logger.info(f"[WEBHOOK] Event saved: ID={db_event.id}, employee={db_event.employee_no}")
 
             event_notification = {
                 "id": db_event.id,
@@ -2528,9 +2436,12 @@ async def receive_webhook_event(
                 "timestamp": db_event.timestamp.isoformat(),
                 "terminal_ip": db_event.terminal_ip
             }
-            await websocket_manager.notify_event_update(event_notification)
+            try:
+                await websocket_manager.notify_event_update(event_notification)
+            except Exception:
+                # Тихая обработка ошибок уведомления
+                pass
         except Exception as save_error:
-            logger.error(f"[WEBHOOK] Error saving event: {save_error}", exc_info=True)
             return {
                 "status": "received",
                 "message": f"Error saving event: {str(save_error)}"

@@ -620,6 +620,7 @@ function UsersManagementPage() {
                           </label>
                           <input
                             type="password"
+                            autoComplete="new-password"
                             value={systemFormData.password}
                             onChange={(e) => setSystemFormData({ ...systemFormData, password: e.target.value })}
                             className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"

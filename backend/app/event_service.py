@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .hikvision_client import HikvisionClient
 from . import crud, schemas_internal
+from .utils.websocket_manager import websocket_manager
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,24 @@ async def process_event_callback(
                 )
                 
                 # Сохраняем событие в БД
-                await crud.create_event(db, event_create)
-                logger.info(f"Event saved: {event_data.get('event_type_description')} for employee {event_data.get('employee_no')}")
+                db_event = await crud.create_event(db, event_create)
+                
+                # Уведомляем WebSocket клиентов о новом событии
+                try:
+                    event_notification = {
+                        "id": db_event.id,
+                        "user_id": db_event.user_id,
+                        "employee_no": db_event.employee_no,
+                        "name": db_event.name,
+                        "event_type": db_event.event_type,
+                        "timestamp": db_event.timestamp.isoformat(),
+                        "terminal_ip": db_event.terminal_ip
+                    }
+                    await websocket_manager.notify_event_update(event_notification)
+                except Exception:
+                    # Тихая обработка ошибок уведомления
+                    pass
+                
                 break
             finally:
                 await db.close()
@@ -72,13 +89,11 @@ async def start_event_listener(
         client: Клиент Hikvision
         get_db_session: Функция для получения новой сессии БД (генератор)
     """
-    logger.info(f"Starting event listener for device {device_id}")
-    
     # Сначала подписываемся на события
     subscribe_result = await client.subscribe_to_events()
     if not subscribe_result.get("success"):
-        logger.warning(f"Failed to subscribe to events for device {device_id}: {subscribe_result.get('error')}")
-        # Продолжаем работу даже если подписка не удалась
+        logger.error(f"Failed to subscribe to events for device {device_id}: {subscribe_result.get('error')}")
+        return
     
     # Создаем callback функцию
     async def event_callback(event: Dict) -> None:
@@ -93,7 +108,6 @@ async def start_event_listener(
         # Удаляем подписку из активных при завершении
         if device_id in _active_subscriptions:
             del _active_subscriptions[device_id]
-        logger.info(f"Event listener stopped for device {device_id}")
 
 
 async def start_device_subscription(
@@ -116,7 +130,6 @@ async def start_device_subscription(
     if device_id in _active_subscriptions:
         task = _active_subscriptions[device_id]
         if not task.done():
-            logger.info(f"Subscription already active for device {device_id}")
             return True
         else:
             # Задача завершена, удаляем её
@@ -126,7 +139,6 @@ async def start_device_subscription(
     try:
         task = asyncio.create_task(start_event_listener(device_id, client, get_db_session))
         _active_subscriptions[device_id] = task
-        logger.info(f"Started subscription for device {device_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to start subscription for device {device_id}: {e}", exc_info=True)
@@ -144,7 +156,6 @@ async def stop_device_subscription(device_id: int) -> bool:
         True если подписка успешно остановлена, False иначе
     """
     if device_id not in _active_subscriptions:
-        logger.info(f"No active subscription for device {device_id}")
         return False
     
     try:
@@ -158,11 +169,9 @@ async def stop_device_subscription(device_id: int) -> bool:
         
         if device_id in _active_subscriptions:
             del _active_subscriptions[device_id]
-        logger.info(f"Stopped subscription for device {device_id}")
         return True
     except KeyError:
         # Подписка уже была удалена
-        logger.debug(f"Subscription for device {device_id} already removed")
         return False
 
 
@@ -188,5 +197,4 @@ async def stop_all_subscriptions() -> None:
     device_ids = list(_active_subscriptions.keys())
     for device_id in device_ids:
         await stop_device_subscription(device_id)
-    logger.info("All subscriptions stopped")
 

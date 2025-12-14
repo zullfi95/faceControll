@@ -518,6 +518,7 @@ const DeviceSettingsPage = () => {
               <Input
                 label="Новый пароль"
                 type="password"
+                autoComplete="new-password"
                 required
                 value={editingDeviceData.password}
                 onChange={(e) => setEditingDeviceData({...editingDeviceData, password: e.target.value})}
@@ -580,6 +581,7 @@ const DeviceSettingsPage = () => {
               <Input
                 label="Пароль"
                 type="password"
+                autoComplete="new-password"
                 required
                 value={newDevice.password}
                 onChange={(e) => setNewDevice({...newDevice, password: e.target.value})}

@@ -84,6 +84,7 @@ function LoginPage() {
               id="username"
               name="username"
               type="text"
+              autoComplete="username"
               required
               placeholder="Введите имя пользователя"
               value={username}
@@ -102,6 +103,7 @@ function LoginPage() {
                 id="password"
                 name="password"
                 type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
                 required
                 placeholder="Введите пароль"
                 value={password}

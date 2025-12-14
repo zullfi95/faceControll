@@ -33,14 +33,40 @@ const EventsPage = () => {
   const [pageSize, setPageSize] = useState(24);
 
   // WebSocket для реального времени обновлений
+  // Включаем WebSocket для получения уведомлений о новых событиях
   const { isConnected, lastMessage } = useEventsWebSocket({
-    enabled: true,
+    enabled: true, // Включаем WebSocket для получения уведомлений
+    maxReconnectAttempts: 3, // Ограничиваем попытки переподключения
+    reconnectInterval: 10000, // Интервал между попытками
     onMessage: (message) => {
       if (message.type === 'event_update') {
-        // Обновляем данные при получении нового события
+        const eventData = message.data;
+
+        // Показываем уведомление
+        if (eventData && eventData.employee_no) {
+          const eventType = eventData.event_type === 'entry' ? 'Вход' : eventData.event_type === 'exit' ? 'Выход' : 'Событие';
+          showToast(`${eventType}: ${eventData.name || eventData.employee_no}`, 'info');
+        } else {
+          showToast('Новое событие получено!', 'info');
+        }
+
+        // Принудительно обновляем список событий
+        queryClient.invalidateQueries(['device-events']);
         queryClient.invalidateQueries(['events']);
-        showToast('Новое событие получено!', 'info');
+
+        // Явно перезапрашиваем данные для немедленного обновления
+        if (selectedDeviceId) {
+          refetch();
+        }
+        
+        // Если выбран device, сразу обновляем данные
+        if (selectedDeviceId) {
+          refetch();
       }
+      }
+    },
+    onError: () => {
+      // Тихая обработка ошибок - не логируем каждую ошибку
     }
   });
   const [showOnlyEmployees, setShowOnlyEmployees] = useState(true); // Фильтр: показывать только события сотрудников
@@ -56,17 +82,6 @@ const EventsPage = () => {
     gcTime: 24 * 60 * 60 * 1000,
   });
 
-  // Получение статуса подписки
-  const { data: subscriptionStatus } = useQuery({
-    queryKey: ['subscription-status', selectedDeviceId],
-    queryFn: async () => {
-      if (!selectedDeviceId) return null;
-      const res = await axios.get(`/api/devices/${selectedDeviceId}/events/subscription-status`);
-      return res.data;
-    },
-    enabled: !!selectedDeviceId,
-    refetchInterval: 5000, // Обновляем каждые 5 секунд
-  });
 
   // Получение событий с терминала
   const { data: eventsData, isLoading, refetch } = useQuery({
@@ -83,7 +98,9 @@ const EventsPage = () => {
     },
     enabled: !!selectedDeviceId,
     retry: false,
-    staleTime: 0,
+    staleTime: 0, // Данные всегда считаются устаревшими, чтобы обновляться при invalidateQueries
+    refetchOnWindowFocus: true, // Обновляем при фокусе окна
+    refetchOnMount: true, // Обновляем при монтировании
   });
 
   // Синхронизация событий в БД
@@ -123,53 +140,11 @@ const EventsPage = () => {
     }
   });
 
-  // Подписка на события
-  const subscribeMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedDeviceId) return;
-      // Сначала настраиваем webhook
-      await configureWebhookMutation.mutateAsync();
-      // Затем запускаем подписку
-      return axios.post(`/api/devices/${selectedDeviceId}/events/subscribe`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries(['subscription-status', selectedDeviceId]);
-      showToast.success('Подписка на события запущена (webhook настроен)');
-    },
-    onError: (error) => {
-      showToast.error('Ошибка запуска подписки: ' + (error.response?.data?.detail || error.message));
-    }
-  });
-
-  // Отписка от событий
-  const unsubscribeMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedDeviceId) return;
-      return axios.post(`/api/devices/${selectedDeviceId}/events/unsubscribe`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries(['subscription-status', selectedDeviceId]);
-      showToast.success('Подписка на события остановлена');
-    },
-    onError: (error) => {
-      showToast.error('Ошибка остановки подписки: ' + (error.response?.data?.detail || error.message));
-    }
-  });
 
   const [syncConfirm, setSyncConfirm] = useState(false);
-  const [subscribeConfirm, setSubscribeConfirm] = useState(false);
-  const [unsubscribeConfirm, setUnsubscribeConfirm] = useState(false);
 
   const handleSync = () => {
     setSyncConfirm(true);
-  };
-
-  const handleSubscribe = () => {
-    setSubscribeConfirm(true);
-  };
-
-  const handleUnsubscribe = () => {
-    setUnsubscribeConfirm(true);
   };
 
   const formatDateTime = (dateString) => {
@@ -321,7 +296,7 @@ const EventsPage = () => {
             </label>
           </div>
 
-          <div className="flex items-end gap-2">
+          <div className="flex flex-col gap-2 items-start">
             <Button
               onClick={() => refetch()}
               disabled={!selectedDeviceId || isLoading}
@@ -358,32 +333,6 @@ const EventsPage = () => {
             )}
           </div>
 
-          <div className="flex items-end gap-2">
-            {subscriptionStatus?.is_active ? (
-              <Button
-                variant="error"
-                onClick={handleUnsubscribe}
-                disabled={!selectedDeviceId || unsubscribeMutation.isPending}
-                loading={unsubscribeMutation.isPending}
-                className="flex-1"
-              >
-                Остановить подписку
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                onClick={handleSubscribe}
-                disabled={!selectedDeviceId || subscribeMutation.isPending}
-                loading={subscribeMutation.isPending}
-                className="flex-1"
-              >
-                Запустить подписку
-              </Button>
-            )}
-            {subscriptionStatus?.is_active && (
-              <Badge variant="success">Активна</Badge>
-            )}
-          </div>
         </div>
       </Card>
 
@@ -727,33 +676,6 @@ const EventsPage = () => {
         variant="info"
       />
 
-      <ConfirmDialog
-        isOpen={subscribeConfirm}
-        onClose={() => setSubscribeConfirm(false)}
-        onConfirm={() => {
-          subscribeMutation.mutate();
-          setSubscribeConfirm(false);
-        }}
-        title="Подписка на события"
-        message="Запустить подписку на события в реальном времени?"
-        confirmText="Запустить"
-        cancelText="Отмена"
-        variant="info"
-      />
-
-      <ConfirmDialog
-        isOpen={unsubscribeConfirm}
-        onClose={() => setUnsubscribeConfirm(false)}
-        onConfirm={() => {
-          unsubscribeMutation.mutate();
-          setUnsubscribeConfirm(false);
-        }}
-        title="Остановка подписки"
-        message="Остановить подписку на события?"
-        confirmText="Остановить"
-        cancelText="Отмена"
-        variant="warning"
-      />
     </div>
   );
 };

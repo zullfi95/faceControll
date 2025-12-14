@@ -36,6 +36,19 @@ const UsersPage = () => {
   // Состояние для принудительного обновления изображений
   const [imageVersion, setImageVersion] = useState(0);
   
+  // Accessibility: Live region для объявлений
+  const [liveMessage, setLiveMessage] = useState('');
+  
+  // Состояния для подтверждений (должны быть объявлены до всех хуков)
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [syncConfirm, setSyncConfirm] = useState(null);
+  
+  // Сохраняем выбранное устройство в localStorage (должно быть до useQuery)
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() => {
+    const saved = localStorage.getItem('selectedDeviceId');
+    return saved ? parseInt(saved) : null;
+  });
+  
   const { data: users, isLoading, refetch: refetchUsers } = useQuery({
     queryKey: ['users'],
     queryFn: async () => {
@@ -58,12 +71,6 @@ const UsersPage = () => {
   });
 
   // Получение пользователей с терминала
-  // Сохраняем выбранное устройство в localStorage
-  const [selectedDeviceId, setSelectedDeviceId] = useState(() => {
-    const saved = localStorage.getItem('selectedDeviceId');
-    return saved ? parseInt(saved) : null;
-  });
-
   // Сохраняем выбранное устройство при изменении
   const handleDeviceChange = (deviceId) => {
     const id = deviceId ? parseInt(deviceId) : null;
@@ -91,23 +98,17 @@ const UsersPage = () => {
 
   // Запуск режима захвата лица на терминале
   const handleStartFaceCapture = async () => {
-    console.log('🚀 [START] handleStartFaceCapture вызван');
-    console.log('📋 [DATA] newUser:', newUser);
-    
     if (!newUser.hikvision_id) {
-      console.warn('⚠️ [VALIDATION] ID сотрудника не заполнен');
       showToast.warning('Сначала введите ID сотрудника!');
       return;
     }
     
-    console.log('✅ [VALIDATION] Валидация пройдена');
     setIsCapturingFromTerminal(true);
     setCaptureStatus('waiting');
     setCaptureMessage('Запуск режима захвата на терминале...');
     
     try {
       // Получаем device_id (берем первый активный)
-      console.log('🔍 [DEVICE] Получение списка устройств...');
       const devicesRes = await axios.get('/api/devices/');
       const device = devicesRes.data.find(d => d.is_active) || devicesRes.data[0];
       
@@ -115,19 +116,10 @@ const UsersPage = () => {
         throw new Error('Устройство не найдено');
       }
       
-      console.log('✅ [DEVICE] Устройство найдено:', device.id, device.name);
-      
       // Запускаем режим захвата (передаем имя для создания пользователя если нужно)
-      console.log('📤 [REQUEST] Отправка запроса на захват фото...');
       const response = await axios.post(`/api/devices/${device.id}/start-face-capture`, {
         employee_no: newUser.hikvision_id,
         full_name: newUser.full_name || ""
-      });
-
-      console.log('📥 [RESPONSE] Ответ получен:', {
-        success: response.data.success,
-        photo_path: response.data.photo_path,
-        method: response.data.method
       });
 
       if (response.data.success) {
@@ -137,49 +129,34 @@ const UsersPage = () => {
 
         // Показываем захваченное фото
         if (response.data.photo_path) {
-          console.log('📸 [PHOTO] Фото захвачено, путь:', response.data.photo_path);
-          console.log('📥 [DOWNLOAD] Скачивание фото с сервера...');
-          
           // Получаем фото через API
           const photoResponse = await axios.get(`/api${response.data.photo_path}`, {
             responseType: 'blob'
           });
 
-          console.log('✅ [DOWNLOAD] Фото скачано, размер:', photoResponse.data.size, 'bytes');
           const photoUrl = URL.createObjectURL(photoResponse.data);
           setCapturedPhotoUrl(photoUrl);
-          console.log('🖼️ [DISPLAY] capturedPhotoUrl установлен:', photoUrl);
           
           // Создаем файл из blob для сохранения
           const file = new File([photoResponse.data], `${newUser.hikvision_id}_face.jpg`, { type: 'image/jpeg' });
           setNewUserPhoto(file);
-          
-          console.log('✅ [PHOTO] Фото установлено в newUserPhoto:', {
-            name: file.name,
-            size: file.size,
-            type: file.type
-          });
         } else if (response.data.can_continue_without_preview) {
           // Фото захвачено на терминале, но предпросмотр недоступен из-за ограничений прав
-          console.log('⚠️ [PHOTO] Предпросмотр недоступен, но фото захвачено на терминале');
           setCaptureMessage('✅ Фото захвачено на терминале! (Предпросмотр недоступен из-за прав доступа, но регистрация возможна)');
           
           // Создаем фиктивный файл-заглушку чтобы активировать кнопку "Сохранить"
           const placeholderBlob = new Blob([''], { type: 'image/jpeg' });
           const placeholderFile = new File([placeholderBlob], `${newUser.hikvision_id}_terminal_captured.jpg`, { type: 'image/jpeg' });
           setNewUserPhoto(placeholderFile);
-          
-          console.log('✅ [PHOTO] Установлен placeholder для активации формы');
         }
 
         // Фото уже захвачено и загружено на терминал
         setIsCapturingFromTerminal(false);
-        console.log('✅ [STATE] Состояние обновлено: isCapturingFromTerminal=false');
       } else {
         throw new Error(response.data.message || 'Не удалось захватить фото');
       }
     } catch (error) {
-      console.error('❌ [ERROR] Ошибка при захвате фото:', error);
+      console.error('Ошибка при захвате фото:', error);
       setCaptureStatus('error');
       setCaptureMessage('Ошибка: ' + (error.response?.data?.detail || error.message));
       setIsCapturingFromTerminal(false);
@@ -215,8 +192,6 @@ const UsersPage = () => {
           headers: { 'Content-Type': 'multipart/form-data' }
         });
       } else {
-        console.log('⏭️ [UPLOAD] Пропускаем загрузку фото - используется захваченное на терминале');
-        console.log('ℹ️ [INFO] Фото будет сохранено на сервере при синхронизации с терминалом');
         setCreationStep('Используется фото с терминала...');
       }
       
@@ -321,13 +296,9 @@ const UsersPage = () => {
     }
   });
 
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
-
   const handleDelete = (userId, userName) => {
     setDeleteConfirm({ userId, userName });
   };
-
-  const [syncConfirm, setSyncConfirm] = useState(null);
 
   const handlePhotoUpload = (userId) => {
     if (!selectedPhoto) {
@@ -426,8 +397,6 @@ const UsersPage = () => {
       </div>
     );
   }
-
-  const [liveMessage, setLiveMessage] = useState('');
 
   return (
     <div>
