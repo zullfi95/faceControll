@@ -3,7 +3,116 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Face Control Admin</title>
+    <title>FaceControll NEW</title>
+    <script>
+      // Раннее подавление ошибок WebSocket - выполняется до загрузки React
+      // Переопределяем WebSocket конструктор для подавления ошибок на уровне API
+      (function() {
+        'use strict';
+        
+        // Сохраняем оригинальный WebSocket
+        const OriginalWebSocket = window.WebSocket;
+        
+        // Переопределяем WebSocket конструктор
+        window.WebSocket = function(url, protocols) {
+          const ws = new OriginalWebSocket(url, protocols);
+          
+          // Перехватываем все события ошибок до того, как они попадут в консоль
+          const originalAddEventListener = ws.addEventListener.bind(ws);
+          ws.addEventListener = function(type, listener, options) {
+            if (type === 'error') {
+              return originalAddEventListener(type, function(event) {
+                // Подавляем ошибку, но все равно вызываем listener для внутренней обработки
+                try {
+                  if (listener) listener(event);
+                } catch (e) {
+                  // Тихая обработка
+                }
+              }, options);
+            }
+            return originalAddEventListener(type, listener, options);
+          };
+          
+          // Переопределяем onerror для подавления
+          Object.defineProperty(ws, 'onerror', {
+            get: function() {
+              return this._onerror;
+            },
+            set: function(handler) {
+              this._onerror = handler;
+              if (handler) {
+                OriginalWebSocket.prototype.addEventListener.call(this, 'error', function(event) {
+                  try {
+                    handler(event);
+                  } catch (e) {
+                    // Тихая обработка
+                  }
+                });
+              }
+            },
+            configurable: true
+          });
+          
+          return ws;
+        };
+        
+        // Копируем константы и статические свойства
+        Object.setPrototypeOf(window.WebSocket, OriginalWebSocket);
+        Object.defineProperty(window.WebSocket, 'CONNECTING', { value: OriginalWebSocket.CONNECTING });
+        Object.defineProperty(window.WebSocket, 'OPEN', { value: OriginalWebSocket.OPEN });
+        Object.defineProperty(window.WebSocket, 'CLOSING', { value: OriginalWebSocket.CLOSING });
+        Object.defineProperty(window.WebSocket, 'CLOSED', { value: OriginalWebSocket.CLOSED });
+        
+        // Подавление console.error/warn/log для WebSocket ошибок
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        const originalLog = console.log;
+        
+        function isWebSocketError(message) {
+          const msg = String(message || '');
+          return msg.includes('WebSocket') || 
+                 msg.includes('ws://') || 
+                 msg.includes('wss://') ||
+                 (msg.includes('connection to') && (msg.includes('failed') || msg.includes('closed'))) ||
+                 msg.includes('closed before the connection is established');
+        }
+        
+        console.error = function(...args) {
+          if (!isWebSocketError(args[0])) {
+            originalError.apply(console, args);
+          }
+        };
+        
+        console.warn = function(...args) {
+          if (!isWebSocketError(args[0])) {
+            originalWarn.apply(console, args);
+          }
+        };
+        
+        console.log = function(...args) {
+          if (!isWebSocketError(args[0])) {
+            originalLog.apply(console, args);
+          }
+        };
+        
+        // Перехватываем глобальные ошибки
+        window.addEventListener('error', function(event) {
+          if (isWebSocketError(event.message)) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          }
+        }, true);
+        
+        // Перехватываем необработанные промисы
+        window.addEventListener('unhandledrejection', function(event) {
+          if (isWebSocketError(event.reason)) {
+            event.preventDefault();
+            return true;
+          }
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

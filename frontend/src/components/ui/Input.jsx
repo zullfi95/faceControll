@@ -1,6 +1,6 @@
 import React from 'react';
 
-const Input = ({
+const Input = React.forwardRef(({
   label,
   error,
   helperText,
@@ -8,7 +8,7 @@ const Input = ({
   className = '',
   id: inputId,
   ...props
-}) => {
+}, ref) => {
   const id = inputId || `input-${Math.random().toString(36).substr(2, 9)}`;
   const errorId = error ? `${id}-error` : undefined;
   const helperId = helperText && !error ? `${id}-helper` : undefined;
@@ -25,12 +25,13 @@ const Input = ({
         </label>
       )}
       <input
+        ref={ref}
         id={id}
         className={`
-          block w-full rounded-md border-gray-300 shadow-sm
-          focus:border-[rgb(19,91,147)] focus:ring-[rgb(19,91,147)]
-          sm:text-sm transition-colors duration-200
-          ${error ? 'border-red-300 focus:border-red-500 focus:ring-red-500' : ''}
+          block w-full rounded-md border-gray-300 shadow-sm px-3 py-2
+          focus:border-[rgb(19,91,147)] focus:ring-2 focus:ring-[rgb(19,91,147)] focus:ring-opacity-20
+          sm:text-sm transition-all duration-200
+          ${error ? 'border-red-300 focus:border-red-500 focus:ring-red-500 focus:ring-opacity-20' : ''}
           ${props.disabled ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}
           ${className}
         `}
@@ -51,7 +52,9 @@ const Input = ({
       )}
     </div>
   );
-};
+});
+
+Input.displayName = 'Input';
 
 export default Input;
 

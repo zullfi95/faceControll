@@ -18,7 +18,8 @@ from .hours_calculation import (
     get_user_shift_for_date,
     get_shift_time_range,
     parse_sessions_from_events,
-    calculate_hours_for_sessions
+    calculate_hours_for_sessions,
+    BAKU_TZ
 )
 from .telegram_bot import TelegramBot, DailyReportFormatter
 
@@ -192,26 +193,30 @@ class DailyReportService:
                 if not user:
                     continue
 
-                # Парсим сессии
-                sessions = parse_sessions_from_events(events)
+                # Парсим сессии (передаем дату отчета для правильной обработки незакрытых сессий)
+                report_datetime = datetime.combine(report_date, time.min, tzinfo=BAKU_TZ)
+                sessions = parse_sessions_from_events(events, report_date=report_datetime)
 
                 # Получаем активную смену пользователя на эту дату
                 user_shift = None
                 shift_time_range = None
 
                 if user_id:
-                    report_datetime = datetime.combine(report_date, time.min)
                     user_shift = await get_user_shift_for_date(db, user_id, report_datetime)
                     if user_shift:
                         shift_time_range = get_shift_time_range(user_shift, report_datetime)
 
-                # Рассчитываем часы в смене и вне смены
+                # Рассчитываем часы в смене и вне смены (передаем user_id для логирования)
                 if shift_time_range:
                     shift_start, shift_end = shift_time_range
-                    hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(sessions, shift_start, shift_end)
+                    hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(
+                        sessions, shift_start, shift_end, user_id=user_id
+                    )
                 else:
                     # Нет активной смены - все часы считаем как вне смены
-                    hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(sessions, None, None)
+                    hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(
+                        sessions, None, None, user_id=user_id
+                    )
 
                 # Общее время работы
                 hours_worked = hours_in_shift + hours_outside_shift
@@ -284,8 +289,9 @@ class DailyReportService:
 
             for user_id, user_events_list in user_events.items():
                 try:
-                    # Парсим сессии для пользователя
-                    sessions = parse_sessions_from_events(user_events_list)
+                    # Парсим сессии для пользователя (передаем дату для правильной обработки незакрытых сессий)
+                    target_datetime = datetime.combine(target_date, time.min, tzinfo=BAKU_TZ)
+                    sessions = parse_sessions_from_events(user_events_list, report_date=target_datetime)
 
                     # Если есть незакрытые сессии (последняя сессия без выхода)
                     if sessions and len(sessions) > 0:

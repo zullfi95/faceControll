@@ -409,7 +409,7 @@ function WorkShiftsPage() {
                             : 'bg-gray-50 border border-gray-200'
                         }`}
                       >
-                        <div className="font-medium">{day.label}</div>
+                        <div className="font-medium text-gray-900">{day.label}</div>
                         {daySchedule.enabled ? (
                           <div className="text-gray-600">
                             {daySchedule.start} - {daySchedule.end}
@@ -431,7 +431,7 @@ function WorkShiftsPage() {
                     {shiftAssignments.map((assignment) => (
                       <div
                         key={assignment.id}
-                        className="flex justify-between items-center p-2 bg-gray-50 rounded text-sm"
+                        className="flex justify-between items-center p-2 bg-gray-50 rounded text-sm text-gray-900"
                       >
                         <span>{assignment.user_name || `User ID: ${assignment.user_id}`}</span>
                         <Button

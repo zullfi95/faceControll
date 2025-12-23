@@ -26,7 +26,7 @@ const Sidebar = () => {
   const menuItems = [
     {
       path: '/users',
-      label: 'Сотрудники',
+      label: 'Добавить пользователя',
       icon: UserGroupIcon,
     },
     {

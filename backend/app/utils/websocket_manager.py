@@ -4,14 +4,12 @@
 Позволяет рассылать обновления всем подключенным клиентам
 при получении новых событий от терминалов.
 """
-import json
 import logging
 from typing import Dict, List
 from fastapi import WebSocket
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
 
 class WebSocketManager:
     """Менеджер активных WebSocket соединений."""
@@ -28,8 +26,11 @@ class WebSocketManager:
         if channel not in self.active_connections:
             self.active_connections[channel] = []
 
-        await websocket.accept()
-        self.active_connections[channel].append(websocket)
+        try:
+            await websocket.accept()
+            self.active_connections[channel].append(websocket)
+        except Exception as e:
+            raise e
 
     async def disconnect(self, websocket: WebSocket, channel: str = "events"):
         """Отключение WebSocket клиента."""
@@ -48,7 +49,6 @@ class WebSocketManager:
             try:
                 await websocket.send_json(message)
             except Exception:
-                # Тихая обработка отключенных клиентов
                 disconnected.append(websocket)
 
         # Удаляем отключенные соединения
@@ -86,6 +86,7 @@ class WebSocketManager:
         """Получение количества активных соединений."""
         if channel:
             return len(self.active_connections.get(channel, []))
+
         return sum(len(connections) for connections in self.active_connections.values())
 
 

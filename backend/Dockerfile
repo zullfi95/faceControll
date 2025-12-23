@@ -18,5 +18,6 @@ COPY . .
 # Создание директории для загружаемых файлов
 RUN mkdir -p /app/uploads
 
-# Запуск приложения
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Запуск приложения с hot reload для разработки
+# Используем переменную окружения для переключения между dev и prod режимами
+CMD ["sh", "-c", "if [ \"$ENVIRONMENT\" = \"development\" ]; then uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*' --reload; else uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'; fi"]

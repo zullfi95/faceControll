@@ -19,18 +19,9 @@ CREATE INDEX IF NOT EXISTS idx_system_users_username ON system_users(username);
 CREATE INDEX IF NOT EXISTS idx_system_users_email ON system_users(email);
 CREATE INDEX IF NOT EXISTS idx_system_users_role ON system_users(role);
 
--- Insert default Operations Manager user (password: admin123)
--- Password hash for "admin123" using bcrypt
-INSERT INTO system_users (username, email, full_name, role, hashed_password, is_active)
-VALUES (
-    'admin',
-    'admin@example.com',
-    'Administrator',
-    'operations_manager',
-    '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYqJqZqZqZq',  -- admin123
-    TRUE
-)
-ON CONFLICT (username) DO NOTHING;
+-- Note: Default admin user should be created using the script:
+-- python scripts/create_admin_user.py
+-- This ensures proper password hashing and avoids hardcoding credentials in migrations
 
 COMMENT ON TABLE system_users IS 'System users for web interface authentication';
 COMMENT ON COLUMN system_users.role IS 'User role: project_lead, operations_manager, manager, supervisor, cleaner';

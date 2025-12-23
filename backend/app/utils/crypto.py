@@ -2,19 +2,14 @@
 Утилиты для шифрования и дешифрования данных.
 Используется для безопасного хранения паролей устройств в БД.
 """
-import os
 from cryptography.fernet import Fernet
 import base64
+from ..config import settings
 
 
 def get_encryption_key() -> bytes:
-    """Получение ключа шифрования из переменной окружения."""
-    key = os.getenv("ENCRYPTION_KEY")
-    if not key:
-        # Если ключ не задан, генерируем предупреждение
-        # В production это должно быть обязательно задано
-        raise ValueError("ENCRYPTION_KEY not set in environment variables")
-    return key.encode()
+    """Получение ключа шифрования из конфигурации."""
+    return settings.encryption_key.encode()
 
 
 def encrypt_password(password: str) -> str:

@@ -34,7 +34,7 @@ const EventsPage = () => {
 
   // WebSocket для реального времени обновлений
   // Включаем WebSocket для получения уведомлений о новых событиях
-  const { isConnected, lastMessage } = useEventsWebSocket({
+  const wsOptions = useMemo(() => ({
     enabled: true, // Включаем WebSocket для получения уведомлений
     maxReconnectAttempts: 3, // Ограничиваем попытки переподключения
     reconnectInterval: 10000, // Интервал между попытками
@@ -53,22 +53,14 @@ const EventsPage = () => {
         // Принудительно обновляем список событий
         queryClient.invalidateQueries(['device-events']);
         queryClient.invalidateQueries(['events']);
-
-        // Явно перезапрашиваем данные для немедленного обновления
-        if (selectedDeviceId) {
-          refetch();
-        }
-        
-        // Если выбран device, сразу обновляем данные
-        if (selectedDeviceId) {
-          refetch();
-      }
       }
     },
     onError: () => {
       // Тихая обработка ошибок - не логируем каждую ошибку
     }
-  });
+  }), [selectedDeviceId, queryClient]);
+
+  const { isConnected, lastMessage } = useEventsWebSocket(wsOptions);
   const [showOnlyEmployees, setShowOnlyEmployees] = useState(true); // Фильтр: показывать только события сотрудников
 
   // Получение устройств
@@ -78,8 +70,9 @@ const EventsPage = () => {
       const res = await axios.get('/api/devices/');
       return res.data;
     },
-    staleTime: Infinity,
+    staleTime: 5 * 60 * 1000, // 5 минут - данные считаются свежими
     gcTime: 24 * 60 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000, // Обновляем каждые 5 минут
   });
 
 
@@ -101,6 +94,9 @@ const EventsPage = () => {
     staleTime: 0, // Данные всегда считаются устаревшими, чтобы обновляться при invalidateQueries
     refetchOnWindowFocus: true, // Обновляем при фокусе окна
     refetchOnMount: true, // Обновляем при монтировании
+    // Автоматическое обновление каждые 30 секунд для актуальных данных
+    refetchInterval: 30000,
+    refetchIntervalInBackground: true,
   });
 
   // Синхронизация событий в БД

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, RootModel, Field, field_validator
+from pydantic import BaseModel, RootModel, Field, field_validator, EmailStr
 from datetime import datetime
 from typing import Optional, List, Dict
 from .enums import UserRole
@@ -41,6 +41,20 @@ class UserResponse(UserBase):
 
     class Config:
         from_attributes = True
+
+class UserStatisticsResponse(BaseModel):
+    """Статистика пользователя."""
+    user_id: int
+    user_name: str
+    hikvision_id: str
+    total_events: int
+    total_entry_events: int
+    total_exit_events: int
+    first_event_date: Optional[datetime] = None
+    last_event_date: Optional[datetime] = None
+    events_last_30_days: int
+    events_last_7_days: int
+    events_today: int
 
 # --- Role Schemas ---
 class RoleInfo(BaseModel):
@@ -174,6 +188,50 @@ class DailyReportResponse(RootModel):
     """Ответ endpoint /reports/daily."""
     root: List[DailyReportEntry]
 
+# --- Shift-based Reports Schemas ---
+class ShiftDayEmployee(BaseModel):
+    """Данные сотрудника для дня смены."""
+    user_id: int
+    user_name: str
+    hikvision_id: str
+    shift_start_time: Optional[str] = None  # Время начала смены в формате "HH:MM"
+    shift_duration_hours: Optional[float] = None  # Продолжительность смены в часах (разница между start и end)
+    first_entry_time: Optional[str] = None  # Время первого входа за смену (ISO format)
+    delay_minutes: Optional[int] = None  # Опоздание в минутах (если есть)
+    last_entry_exit_time: Optional[str] = None  # Время последнего входа/выхода (ISO format)
+    last_event_type: Optional[str] = None  # "entry" или "exit"
+    hours_worked_total: Optional[float] = None  # Общее время работы (часы в день)
+    hours_in_shift: float  # Время за смену
+    hours_outside_shift: float  # Время вне смены
+    status: str  # "Present", "Absent", "Present (no exit)"
+
+class DaySchedule(BaseModel):
+    """Расписание на один день недели."""
+    start: str  # Время начала в формате "HH:MM" (например, "09:00")
+    end: str  # Время окончания в формате "HH:MM" (например, "18:00")
+    enabled: bool = True  # Включен ли этот день
+
+class ShiftDay(BaseModel):
+    """Данные для одного дня недели смены."""
+    day_of_week: int  # 0-6 (0=Monday, 6=Sunday)
+    day_name: str  # Название дня недели
+    is_active: bool  # Активен ли этот день (для выбранной даты)
+    schedule: Optional[DaySchedule] = None  # Расписание на этот день
+    employees: List[ShiftDayEmployee]  # Список сотрудников для этого дня
+
+class ShiftReport(BaseModel):
+    """Отчет по одной смене."""
+    shift_id: int
+    shift_name: str
+    shift_description: Optional[str] = None
+    days: List[ShiftDay]  # Список дней недели (обычно только активный день)
+    active_day: int  # Активный день недели для выбранной даты (0-6)
+
+class ShiftReportResponse(BaseModel):
+    """Ответ endpoint /reports/daily с группировкой по сменам."""
+    shifts: List[ShiftReport]
+    report_date: str  # Дата отчета (YYYY-MM-DD)
+
 class EventSyncResponse(BaseModel):
     """Ответ endpoint синхронизации событий."""
     success: bool
@@ -199,9 +257,9 @@ class UserLogin(BaseModel):
 class SystemUserBase(BaseModel):
     """Базовая схема пользователя системы."""
     username: str
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
     full_name: Optional[str] = None
-    role: str = "cleaner"
+    role: str = UserRole.CLEANER.value
     is_active: bool = True
 
 class SystemUserCreate(SystemUserBase):
@@ -210,7 +268,7 @@ class SystemUserCreate(SystemUserBase):
 
 class SystemUserUpdate(BaseModel):
     """Схема для обновления пользователя системы."""
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     role: Optional[str] = None
     password: Optional[str] = None
@@ -238,12 +296,6 @@ class CurrentUserResponse(BaseModel):
         from_attributes = True
 
 # --- Work Shift Schemas ---
-class DaySchedule(BaseModel):
-    """Расписание на один день недели."""
-    start: str  # Время начала в формате "HH:MM" (например, "09:00")
-    end: str  # Время окончания в формате "HH:MM" (например, "18:00")
-    enabled: bool = True  # Включен ли этот день
-
 class WorkShiftBase(BaseModel):
     """Базовая схема рабочей смены."""
     name: str
@@ -284,6 +336,32 @@ class UserShiftAssignmentBase(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     is_active: bool = True
+    
+    @field_validator('start_date', 'end_date', mode='before')
+    @classmethod
+    def parse_date_string(cls, v):
+        """Конвертирует строку даты в datetime, если необходимо."""
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            # Пробуем разные форматы
+            try:
+                # Формат "YYYY-MM-DD"
+                if len(v) == 10 and v.count('-') == 2:
+                    return datetime.strptime(v, "%Y-%m-%d")
+                # Формат ISO с T
+                if 'T' in v or 't' in v or '_' in v:
+                    return datetime.fromisoformat(v.replace('Z', '+00:00'))
+                # Пробуем стандартный парсинг
+                return datetime.fromisoformat(v)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Invalid date format: {v}. Expected YYYY-MM-DD or ISO datetime format.")
+        return v
 
 class UserShiftAssignmentCreate(UserShiftAssignmentBase):
     """Схема для создания привязки."""
@@ -295,6 +373,32 @@ class UserShiftAssignmentUpdate(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     is_active: Optional[bool] = None
+    
+    @field_validator('start_date', 'end_date', mode='before')
+    @classmethod
+    def parse_date_string(cls, v):
+        """Конвертирует строку даты в datetime, если необходимо."""
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            # Пробуем разные форматы
+            try:
+                # Формат "YYYY-MM-DD"
+                if len(v) == 10 and v.count('-') == 2:
+                    return datetime.strptime(v, "%Y-%m-%d")
+                # Формат ISO с T
+                if 'T' in v or 't' in v or '_' in v:
+                    return datetime.fromisoformat(v.replace('Z', '+00:00'))
+                # Пробуем стандартный парсинг
+                return datetime.fromisoformat(v)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Invalid date format: {v}. Expected YYYY-MM-DD or ISO datetime format.")
+        return v
 
 class UserShiftAssignmentResponse(UserShiftAssignmentBase):
     """Схема ответа с данными привязки."""

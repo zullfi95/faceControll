@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_
 from typing import List, Dict, Any, Optional
 import os
 import uuid
@@ -24,8 +24,50 @@ from .auth import (
     verify_password, create_access_token, get_current_active_user,
     require_operations_manager, get_current_user
 )
+from .config import settings
 from fastapi import Request, Header
 from fastapi.security import OAuth2PasswordRequestForm
+
+UPLOAD_DIR = Path("uploads")
+
+
+def validate_environment():
+    """Валидация критически важных переменных окружения при запуске."""
+    import logging
+    temp_logger = logging.getLogger(__name__)
+    errors = []
+
+    # Проверка обязательных настроек
+    if not settings.jwt_secret_key:
+        errors.append("JWT_SECRET_KEY is required")
+
+    if not settings.encryption_key:
+        errors.append("ENCRYPTION_KEY is required")
+
+    if not settings.webhook_api_key and settings.is_production():
+        errors.append("WEBHOOK_API_KEY is required in production")
+
+    # Проверка базы данных
+    if not settings.database_url:
+        errors.append("DATABASE_URL or PostgreSQL settings are required")
+
+    # Проверка директории для загрузок
+    if not UPLOAD_DIR.exists():
+        try:
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            errors.append(f"Cannot create upload directory: {e}")
+
+    if errors:
+        error_msg = "Environment validation failed:\n" + "\n".join(f"- {error}" for error in errors)
+        temp_logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    temp_logger.info("Environment validation passed")
+
+
+# Валидация окружения при импорте модуля
+validate_environment()
 
 app = FastAPI(title="Face Access Control System")
 
@@ -54,9 +96,8 @@ def get_device_password_safe(device, device_id: int = None) -> str:
             detail=str(e)
         )
 
-WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "")
+WEBHOOK_API_KEY = settings.webhook_api_key
 
-UPLOAD_DIR = Path("/app/uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 @app.get("/uploads/{filename:path}")
@@ -162,17 +203,80 @@ async def create_user(user: schemas.UserCreate, db: AsyncSession = Depends(datab
     return await crud.create_user(db=db, user=user)
 
 @app.get("/users/", response_model=List[schemas.UserResponse])
-async def get_users(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(database.get_db)):
+async def get_users(
+    skip: int = 0, 
+    limit: int = 100, 
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(get_current_active_user)
+):
     """Получение списка пользователей."""
     return await crud.get_users(db, skip=skip, limit=limit)
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
-async def get_user(user_id: int, db: AsyncSession = Depends(database.get_db)):
+async def get_user(
+    user_id: int, 
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(get_current_active_user)
+):
     """Получение пользователя по ID."""
     user = await crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+@app.get("/users/{user_id}/statistics", response_model=schemas.UserStatisticsResponse)
+async def get_user_statistics(
+    user_id: int, 
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(get_current_active_user)
+):
+    """Получение статистики пользователя."""
+    from sqlalchemy import func, and_
+    from datetime import datetime, timedelta, timezone
+    
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Получаем все события пользователя
+    all_events_query = select(models.AttendanceEvent).filter(
+        models.AttendanceEvent.user_id == user_id
+    ).order_by(models.AttendanceEvent.timestamp.asc())
+    
+    result = await db.execute(all_events_query)
+    all_events = result.scalars().all()
+    
+    # Вычисляем статистику
+    total_events = len(all_events)
+    total_entry_events = sum(1 for e in all_events if e.event_type == "entry")
+    total_exit_events = sum(1 for e in all_events if e.event_type == "exit")
+    
+    first_event_date = all_events[0].timestamp if all_events else None
+    last_event_date = all_events[-1].timestamp if all_events else None
+    
+    # События за последние 30 дней
+    now = datetime.now(timezone.utc)
+    date_30_days_ago = now - timedelta(days=30)
+    date_7_days_ago = now - timedelta(days=7)
+    today_start = datetime.combine(now.date(), time.min).replace(tzinfo=timezone.utc)
+    
+    events_last_30_days = sum(1 for e in all_events if e.timestamp >= date_30_days_ago)
+    events_last_7_days = sum(1 for e in all_events if e.timestamp >= date_7_days_ago)
+    events_today = sum(1 for e in all_events if e.timestamp >= today_start)
+    
+    return schemas.UserStatisticsResponse(
+        user_id=user.id,
+        user_name=user.full_name or f"User {user.hikvision_id}",
+        hikvision_id=user.hikvision_id,
+        total_events=total_events,
+        total_entry_events=total_entry_events,
+        total_exit_events=total_exit_events,
+        first_event_date=first_event_date,
+        last_event_date=last_event_date,
+        events_last_30_days=events_last_30_days,
+        events_last_7_days=events_last_7_days,
+        events_today=events_today
+    )
 
 @app.put("/users/{user_id}", response_model=schemas.UserResponse)
 async def update_user(
@@ -425,6 +529,7 @@ async def create_user_shift_assignment(
     current_user: models.SystemUser = Depends(require_operations_manager)
 ):
     """Создание привязки пользователя к смене. Только для Operations Manager."""
+    
     # Проверяем существование пользователя и смены
     user = await crud.get_user_by_id(db, assignment.user_id)
     if not user:
@@ -524,7 +629,11 @@ async def delete_user_shift_assignment(
     return {"message": f"Assignment {assignment_id} deleted successfully"}
 
 @app.delete("/users/{user_id}")
-async def delete_user(user_id: int, db: AsyncSession = Depends(database.get_db)):
+async def delete_user(
+    user_id: int, 
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(require_operations_manager)
+):
     """Удаление пользователя."""
     # Получаем пользователя
     user = await crud.get_user_by_id(db, user_id)
@@ -566,6 +675,17 @@ async def upload_user_photo(
     # Проверка типа файла
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
+    
+    # Проверка размера файла (максимум 200KB)
+    MAX_FILE_SIZE = 200 * 1024  # 200 KB
+    file_content = await file.read()
+    if len(file_content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File size exceeds maximum allowed size of 200KB. Current size: {len(file_content) / 1024:.2f}KB"
+        )
+    # Возвращаем указатель в начало файла для дальнейшего чтения
+    await file.seek(0)
 
     # Удаление старого фото, если оно существует
     if user.photo_path:
@@ -1079,8 +1199,11 @@ async def reboot_device(
 @app.get("/devices/{device_id}/terminal-users")
 async def get_terminal_users(
     device_id: int,
-    db: AsyncSession = Depends(database.get_db)
-) -> List[Dict[str, Any]]:
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(get_current_active_user)
+) -> Dict[str, Any]:
     """
     Получение списка пользователей с терминала.
     
@@ -1101,25 +1224,34 @@ async def get_terminal_users(
 
         if not connected:
             logger.warning(f"Device {device_id} not accessible: {error_msg}")
-            # Возвращаем пустой список вместо ошибки
-            return []
+            # Возвращаем пустой результат с пагинацией вместо ошибки
+            return {"total": 0, "skip": skip, "limit": limit, "users": []}
 
         # Получаем список пользователей
         users = await client.get_users()
 
         if users is None:
             logger.warning(f"Failed to get users from terminal {device_id}")
-            return []
+            return {"total": 0, "skip": skip, "limit": limit, "users": []}
 
-        return users
+        # Применяем пагинацию
+        total = len(users)
+        paginated_users = users[skip:skip + limit]
+
+        return {
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "users": paginated_users
+        }
 
     except PermissionError as pe:
         logger.warning(f"Insufficient permissions for device {device_id}: {str(pe)}")
-        return []
+        return {"total": 0, "skip": skip, "limit": limit, "users": []}
     except Exception as e:
         logger.error(f"Error getting terminal users for device {device_id}: {e}", exc_info=True)
-        # Возвращаем пустой список вместо 500 ошибки
-        return []
+        # Возвращаем пустой результат с пагинацией вместо 500 ошибки
+        return {"total": 0, "skip": skip, "limit": limit, "users": []}
 
 @app.get("/devices/{device_id}/terminal-users/compare")
 async def compare_terminal_users(
@@ -1313,103 +1445,6 @@ async def get_terminal_user_info(
         logger.error(f"Error getting terminal user info: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.get("/devices/{device_id}/terminal-users/compare")
-async def compare_terminal_users(
-    device_id: int,
-    employee_no_1: str,
-    employee_no_2: str,
-    db: AsyncSession = Depends(database.get_db)
-):
-    """
-    Сравнение двух пользователей с терминала.
-    Полезно для выявления различий между рабочим и нерабочим пользователем.
-    """
-    device = await crud.get_device_by_id(db, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    try:
-        password = get_device_password_safe(device, device.id)
-        client = HikvisionClient(device.ip_address, device.username, password)
-        
-        # Получаем полную информацию о обоих пользователях
-        logger.info(f"Сравнение пользователей: {employee_no_1} vs {employee_no_2}")
-        user1_info = await client.get_user_full_info(employee_no_1)
-        user2_info = await client.get_user_full_info(employee_no_2)
-        
-        # Функция для сравнения словарей
-        def compare_dicts(dict1: dict, dict2: dict, path: str = "") -> List[Dict[str, Any]]:
-            differences = []
-            all_keys = set(dict1.keys()) | set(dict2.keys())
-            
-            for key in all_keys:
-                current_path = f"{path}.{key}" if path else key
-                val1 = dict1.get(key)
-                val2 = dict2.get(key)
-                
-                if key not in dict1:
-                    differences.append({
-                        "path": current_path,
-                        "type": "missing_in_first",
-                        "value1": None,
-                        "value2": val2
-                    })
-                elif key not in dict2:
-                    differences.append({
-                        "path": current_path,
-                        "type": "missing_in_second",
-                        "value1": val1,
-                        "value2": None
-                    })
-                elif isinstance(val1, dict) and isinstance(val2, dict):
-                    differences.extend(compare_dicts(val1, val2, current_path))
-                elif val1 != val2:
-                    differences.append({
-                        "path": current_path,
-                        "type": "different",
-                        "value1": val1,
-                        "value2": val2
-                    })
-            
-            return differences
-        
-        # Сравниваем structured данные
-        structured1 = user1_info.get("structured", {})
-        structured2 = user2_info.get("structured", {})
-        differences = compare_dicts(structured1, structured2)
-        
-        # Сравниваем raw данные (только основные поля)
-        user_detail1 = user1_info.get("raw_data", {}).get("user_detail", {})
-        user_detail2 = user2_info.get("raw_data", {}).get("user_detail", {})
-        raw_differences = compare_dicts(user_detail1, user_detail2, "raw_data.user_detail")
-        
-        return {
-            "user1": {
-                "employee_no": employee_no_1,
-                "exists": user1_info.get("sources", {}).get("UserInfo/Detail") is not None,
-                "structured": structured1
-            },
-            "user2": {
-                "employee_no": employee_no_2,
-                "exists": user2_info.get("sources", {}).get("UserInfo/Detail") is not None,
-                "structured": structured2
-            },
-            "differences": {
-                "structured": differences,
-                "raw": raw_differences
-            },
-            "full_data": {
-                "user1": user1_info,
-                "user2": user2_info
-            }
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error comparing terminal users: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
 @app.get("/devices/{device_id}/terminal-users/{employee_no}/photo")
 async def get_terminal_user_photo(
     device_id: int,
@@ -1491,189 +1526,311 @@ async def update_device(
     return device
 
 
-@app.get("/reports/daily", response_model=schemas.DailyReportResponse)
-async def get_daily_report(date_str: str, db: AsyncSession = Depends(database.get_db)):
+@app.get("/reports/daily", response_model=schemas.ShiftReportResponse)
+async def get_daily_report(
+    date_str: str, 
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(get_current_active_user)
+):
     """
-    Получение дневного отчета посещаемости с расчетом часов в смене и вне смены.
+    Получение дневного отчета посещаемости с группировкой по сменам.
 
     Args:
         date_str: Дата в формате YYYY-MM-DD
 
     Returns:
-        Список пользователей с временем входа/выхода, отработанными часами в смене и вне смены
+        Отчет по сменам с детальной информацией о каждом сотруднике
     """
-    from datetime import datetime, time, timezone
+    DAY_NAMES = {
+        0: "Понедельник",
+        1: "Вторник", 
+        2: "Среда",
+        3: "Четверг",
+        4: "Пятница",
+        5: "Суббота",
+        6: "Воскресенье"
+    }
+    
+    from datetime import datetime, time, timezone, timedelta
     from .utils.hours_calculation import (
-        get_user_shift_for_date,
         get_shift_time_range,
         parse_sessions_from_events,
         calculate_hours_for_sessions
     )
+    from . import models
+    from sqlalchemy import select, and_, or_
 
     try:
-        # Парсим дату
-        report_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        report_datetime = datetime.combine(report_date, time.min, tzinfo=timezone.utc)
+        from .utils.hours_calculation import BAKU_TZ
+        
+        # Парсим дату с обработкой ошибок
+        try:
+            report_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid date format: {date_str}. Expected format: YYYY-MM-DD. Error: {str(e)}"
+            )
+        # Используем BAKU_TZ для согласованности с расчетами часов
+        report_datetime = datetime.combine(report_date, time.min, tzinfo=BAKU_TZ)
+        weekday = report_date.weekday()  # 0=Monday, 6=Sunday
 
-        # Создаем диапазон времени (начало и конец дня) с timezone
-        start_datetime = datetime.combine(report_date, time.min, tzinfo=timezone.utc)
-        end_datetime = datetime.combine(report_date, time.max, tzinfo=timezone.utc)
+        logger.info(f"Generating shift-based daily report for {report_date}")
 
-        logger.info(f"Generating daily report for {report_date}")
-
-        # Получаем все события за день с JOIN к пользователям
-        events = await crud.get_all_events_for_day(db, start_datetime, end_datetime)
-
-        # Группируем события по пользователям
-        user_events = {}
+        # Диапазон для поиска событий (с учетом ночных смен)
+        # Используем BAKU_TZ для согласованности
+        start_datetime = datetime.combine(report_date, time.min, tzinfo=BAKU_TZ)
+        end_datetime = datetime.combine(report_date, time.max, tzinfo=BAKU_TZ)
+        extended_start_datetime = start_datetime - timedelta(days=1)
+        
+        # Получаем все события за период
+        events = await crud.get_all_events_for_day(db, extended_start_datetime, end_datetime)
+        
+        # Группируем события по user_id для быстрого доступа
+        events_by_user = {}
         for event in events:
-            user_id = event.user_id
+            if event.user_id:
+                if event.user_id not in events_by_user:
+                    events_by_user[event.user_id] = []
+                events_by_user[event.user_id].append(event)
+        
+        # Получаем все активные смены
+        shifts = await crud.get_all_work_shifts(db, active_only=True)
+        
+        shift_reports = []
+        
+        for shift in shifts:
+            # Получаем всех пользователей, привязанных к этой смене
+            assignments = await crud.get_user_shift_assignments(
+                db, shift_id=shift.id, active_only=True
+            )
 
-            # Используем данные из события, если пользователь не найден
-            if event.user:
-                user_name = event.user.full_name or event.name or f"User {event.employee_no or 'Unknown'}"
-                hikvision_id = event.user.hikvision_id or event.employee_no
-            else:
-                # Событие без связанного пользователя - используем данные из события
-                user_name = event.name or f"User {event.employee_no or 'Unknown'}"
-                hikvision_id = event.employee_no or event.name or "Unknown"
-
-            # Используем user_id как ключ, или комбинацию hikvision_id если user_id None
-            key = user_id if user_id is not None else f"unknown_{hikvision_id}"
-
-            if key not in user_events:
-                user_events[key] = {
-                    "user_id": user_id,
-                    "user": user_name,
-                    "hikvision_id": hikvision_id,
-                    "events": []
-                }
-            user_events[key]["events"].append(event)
-
-        # Обрабатываем данные для каждого пользователя
-        report_data = []
-        for user_data in user_events.values():
-            events_list = sorted(user_data["events"], key=lambda x: x.timestamp)
-
-            # Парсим сессии из событий
-            sessions = parse_sessions_from_events(events_list)
-
-            # Получаем активную смену пользователя на эту дату
-            user_shift = None
-            shift_time_range = None
-
-            if user_data["user_id"]:
-                user_shift = await get_user_shift_for_date(db, user_data["user_id"], report_datetime)
-                if user_shift:
-                    shift_time_range = get_shift_time_range(user_shift, report_datetime)
-
-            # Рассчитываем часы в смене и вне смены
-            if shift_time_range:
-                shift_start, shift_end = shift_time_range
-                hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(sessions, shift_start, shift_end)
-            else:
-                # Нет активной смены - все часы считаем как вне смены
-                hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(sessions, None, None)
-
-            # Общее время работы (для обратной совместимости)
-            hours_worked = hours_in_shift + hours_outside_shift
-
-            # Определяем статус и время входа/выхода
-            entry_time = None
-            exit_time = None
-            status = "Absent"
-
-            if sessions:
-                # Берем первую сессию для определения времени входа
-                entry_time = sessions[0][0]
-                # Берем последнюю сессию для определения времени выхода
-                exit_time = sessions[-1][1]
-
-                if hours_worked > 0:
-                    # Проверяем, есть ли незакрытая сессия
-                    # Незакрытая сессия определяется по последнему событию - если это entry без соответствующего exit
-                    last_event = events_list[-1]
-                    has_open_session = (last_event.event_type == "entry")
+            # Фильтруем привязки по дате (start_date и end_date)
+            active_assignments = []
+            for assignment in assignments:
+                date_check = (not assignment.start_date or assignment.start_date.date() <= report_date) and \
+                           (not assignment.end_date or assignment.end_date.date() >= report_date)
+                if date_check:
+                    active_assignments.append(assignment)
+            
+            # Создаем список всех дней недели из расписания смены
+            shift_days = []
+            
+            # Проходим по всем дням недели (0-6)
+            for day_of_week in range(7):
+                day_schedule_dict = shift.schedule.get(str(day_of_week))
+                
+                # Если день включен в расписании, добавляем его
+                if day_schedule_dict and day_schedule_dict.get("enabled", False):
+                    day_schedule = schemas.DaySchedule(
+                        start=day_schedule_dict.get("start", "09:00"),
+                        end=day_schedule_dict.get("end", "18:00"),
+                        enabled=True
+                    )
                     
-                    if has_open_session:
-                        status = "Present (no exit)"
-                    else:
-                        status = "Present"
-            elif events_list:
-                # Есть события, но нет полных сессий
-                entry_time = events_list[0].timestamp
-                status = "Present (no exit)"
-
-            report_data.append({
-                "user": user_data["user"],
-                "hikvision_id": user_data["hikvision_id"],
-                "entry_time": entry_time.isoformat() if entry_time else None,
-                "exit_time": exit_time.isoformat() if exit_time else None,
-                "hours_worked": round(hours_worked, 2),
-                "hours_in_shift": round(hours_in_shift, 2),
-                "hours_outside_shift": round(hours_outside_shift, 2),
-                "status": status
-            })
-
-        # Сортируем по имени пользователя
-        report_data.sort(key=lambda x: x["user"])
-
-        logger.info(f"Generated report with {len(report_data)} users")
-        return schemas.DailyReportResponse(root=report_data)
+                    # Определяем, является ли этот день активным (соответствует выбранной дате)
+                    is_active = (day_of_week == weekday)
+                    
+                    # Вычисляем продолжительность смены для отображения (одинакова для всех сотрудников дня)
+                    shift_duration_hours = None
+                    if day_schedule:
+                        try:
+                            start_hour, start_minute = map(int, day_schedule.start.split(':'))
+                            end_hour, end_minute = map(int, day_schedule.end.split(':'))
+                            start_time_obj = time(start_hour, start_minute)
+                            end_time_obj = time(end_hour, end_minute)
+                            
+                            # Вычисляем разницу во времени
+                            temp_date = datetime.combine(report_datetime.date(), start_time_obj)
+                            start_datetime = datetime.combine(temp_date.date(), start_time_obj)
+                            end_datetime = datetime.combine(temp_date.date(), end_time_obj)
+                            
+                            # Если время окончания меньше времени начала, значит смена переходит через полночь
+                            if end_datetime < start_datetime:
+                                end_datetime += timedelta(days=1)
+                            
+                            duration_timedelta = end_datetime - start_datetime
+                            shift_duration_hours = duration_timedelta.total_seconds() / 3600.0
+                        except (ValueError, AttributeError) as e:
+                            logger.warning(f"Error calculating shift duration for day {day_of_week}: {e}")
+                    
+                    # Обрабатываем сотрудников только для активного дня
+                    employees_for_day = []
+                    if is_active:
+                        for assignment in active_assignments:
+                            user = assignment.user
+                            user_events = sorted(events_by_user.get(user.id, []), key=lambda x: x.timestamp)
+                            
+                            # Парсим сессии из событий (передаем дату отчета для правильной обработки незакрытых сессий)
+                            sessions = parse_sessions_from_events(user_events, report_date=report_datetime)
+                            
+                            # Получаем расписание смены для этого дня
+                            shift_time_range = None
+                            if day_schedule:
+                                shift_time_range = get_shift_time_range(shift, report_datetime)
+                                if shift_time_range:
+                                    pass
+                                else:
+                                    logger.warning(
+                                        f"No shift time range for user {user.id} on {report_date} "
+                                        f"(shift {shift.name}, weekday {day_of_week})"
+                                    )
+                            
+                            # Рассчитываем часы (передаем user_id для логирования)
+                            if shift_time_range:
+                                hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(
+                                    sessions, shift_time_range[0], shift_time_range[1], user_id=user.id
+                                )
+                            else:
+                                # Если нет расписания смены, считаем все часы как вне смены
+                                hours_in_shift, hours_outside_shift = calculate_hours_for_sessions(
+                                    sessions, None, None, user_id=user.id
+                                )
+                            
+                            # Логируем предупреждения для отладки
+                            if user_events and len(sessions) == 0:
+                                logger.warning(
+                                    f"User {user.id} ({user.full_name}) has {len(user_events)} events but 0 sessions parsed. "
+                                    f"Events: {[(e.event_type, e.timestamp) for e in user_events[:5]]}"
+                                )
+                            elif user_events and hours_in_shift == 0 and hours_outside_shift == 0:
+                                logger.warning(
+                                    f"User {user.id} ({user.full_name}) has {len(sessions)} sessions but 0 hours calculated. "
+                                    f"Sessions: {sessions[:3] if sessions else 'None'}"
+                                )
+                            
+                            # Определяем первое время входа и последнее событие
+                            first_entry_time = None
+                            last_entry_exit_time = None
+                            last_event_type = None
+                            status = "Absent"
+                            
+                            if sessions:
+                                first_entry_time = sessions[0][0]  # Первая сессия - вход
+                                # Используем последнее событие для определения типа и времени
+                                if user_events:
+                                    last_entry_exit_time = user_events[-1].timestamp
+                                    last_event_type = user_events[-1].event_type
+                                    if last_event_type == "entry":
+                                        # Открытая сессия - последнее событие вход
+                                        status = "Present (no exit)"
+                                    else:
+                                        # Закрытая сессия - последнее событие выход
+                                        if hours_in_shift + hours_outside_shift > 0:
+                                            status = "Present"
+                                else:
+                                    # Если нет событий, используем время из сессий
+                                    last_entry_exit_time = sessions[-1][1]  # Последняя сессия - выход
+                                    last_event_type = "exit"
+                                    if hours_in_shift + hours_outside_shift > 0:
+                                        status = "Present"
+                            elif user_events:
+                                first_entry_time = user_events[0].timestamp
+                                last_entry_exit_time = user_events[-1].timestamp
+                                last_event_type = user_events[-1].event_type
+                                status = "Present (no exit)"
+                            
+                            # Вычисляем время начала смены и опоздание
+                            shift_start_time_str = None
+                            delay_minutes = None
+                            if day_schedule and day_schedule.start:
+                                shift_start_time_str = day_schedule.start
+                                
+                                # Вычисляем опоздание, если есть первое время входа
+                                if first_entry_time:
+                                    try:
+                                        # Парсим время начала смены (формат "HH:MM")
+                                        start_hour, start_minute = map(int, day_schedule.start.split(':'))
+                                        shift_start_datetime = report_datetime.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                                        
+                                        # Если первое время входа позже времени начала смены - есть опоздание
+                                        if first_entry_time > shift_start_datetime:
+                                            delay_timedelta = first_entry_time - shift_start_datetime
+                                            delay_minutes = int(delay_timedelta.total_seconds() / 60)
+                                    except (ValueError, AttributeError) as e:
+                                        logger.warning(f"Error calculating delay for user {user.id}: {e}")
+                            
+                            # Общее время работы
+                            hours_worked_total = hours_in_shift + hours_outside_shift
+                            
+                            employees_for_day.append(schemas.ShiftDayEmployee(
+                                user_id=user.id,
+                                user_name=user.full_name or f"User {user.hikvision_id}",
+                                hikvision_id=user.hikvision_id,
+                                shift_start_time=shift_start_time_str,
+                                shift_duration_hours=round(shift_duration_hours, 2) if shift_duration_hours is not None else None,
+                                first_entry_time=first_entry_time.isoformat() if first_entry_time else None,
+                                delay_minutes=delay_minutes,
+                                last_entry_exit_time=last_entry_exit_time.isoformat() if last_entry_exit_time else None,
+                                last_event_type=last_event_type,
+                                hours_worked_total=round(hours_worked_total, 2),
+                                hours_in_shift=round(hours_in_shift, 2),
+                                hours_outside_shift=round(hours_outside_shift, 2),
+                                status=status
+                            ))
+                    
+                    # Создаем данные для дня
+                    day_data = schemas.ShiftDay(
+                        day_of_week=day_of_week,
+                        day_name=DAY_NAMES[day_of_week],
+                        is_active=is_active,
+                        schedule=day_schedule,
+                        employees=employees_for_day
+                    )
+                    shift_days.append(day_data)
+            
+            # Добавляем отчет по смене только если есть хотя бы один день в расписании
+            if shift_days:
+                shift_reports.append(schemas.ShiftReport(
+                    shift_id=shift.id,
+                    shift_name=shift.name,
+                    shift_description=shift.description,
+                    days=shift_days,  # Список всех дней недели из расписания
+                    active_day=weekday
+                ))
+        
+        return schemas.ShiftReportResponse(
+            shifts=shift_reports,
+            report_date=date_str
+        )
 
     except Exception as e:
         logger.error(f"Error generating daily report: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 
-@app.websocket("/api/ws/events")
+@app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
     """WebSocket для обновлений событий в реальном времени."""
     try:
         await websocket_manager.connect(websocket, "events")
         
-        # Упрощенная логика - просто поддерживаем соединение
         try:
-            # Отправляем начальное приветствие сразу при подключении
-            try:
-                await websocket.send_json({"type": "connected", "status": "ok"})
-            except Exception:
-                pass
-
             while True:
                 try:
-                    # Ждем сообщения от клиента с таймаутом
-                    message = await asyncio.wait_for(websocket.receive(), timeout=60.0)
-
-                    if message["type"] == "websocket.receive":
-                        try:
-                            data = message["text"]
-                            message_data = json.loads(data)
-                            message_type = message_data.get("type")
-
-                            # Обрабатываем pong сообщения
-                            if message_type == "pong":
-                                continue
-
-                        except (json.JSONDecodeError, Exception):
-                            # Тихая обработка некорректных сообщений
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                    try:
+                        message_data = json.loads(data)
+                        message_type = message_data.get("type")
+                        
+                        if message_type == "connected":
+                            await websocket.send_json({"type": "connected", "status": "ok"})
+                        elif message_type == "pong":
                             pass
-
-                    elif message["type"] == "websocket.disconnect":
-                        break
-
+                        elif message_type == "ping":
+                            await websocket.send_json({"type": "pong"})
+                            
+                    except Exception as e:
+                        logger.warning(f"Error parsing message: {e}")
                 except asyncio.TimeoutError:
-                    # Отправляем ping для поддержания соединения
                     try:
                         await websocket.send_json({"type": "ping"})
-                    except Exception:
-                        # Соединение закрыто
+                    except:
                         break
         except WebSocketDisconnect:
-            # Нормальное отключение
             pass
         except Exception as e:
-            logger.error(f"Error in WebSocket events handler: {e}", exc_info=True)
+            logger.error(f"Error in events handler: {e}", exc_info=True)
         finally:
             await websocket_manager.disconnect(websocket, "events")
     except Exception as e:
@@ -1683,17 +1840,34 @@ async def websocket_events(websocket: WebSocket):
         except:
             pass
 
-@app.websocket("/api/ws/reports")
+@app.websocket("/ws/reports")
 async def websocket_reports(websocket: WebSocket):
     """WebSocket для обновлений отчетов в реальном времени."""
     try:
         await websocket_manager.connect(websocket, "reports")
+        
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                    try:
+                        message_data = json.loads(data)
+                        message_type = message_data.get("type")
+                        
+                        if message_type == "connected":
+                            await websocket.send_json({"type": "connected", "status": "ok"})
+                        elif message_type == "pong":
+                            pass
+                        elif message_type == "ping":
+                            await websocket.send_json({"type": "pong"})
+                            
+                    except:
+                        pass
                 except asyncio.TimeoutError:
-                    await websocket.send_json({"type": "ping"})
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except:
+                        break
         except WebSocketDisconnect:
             pass
         except Exception as e:
@@ -1701,6 +1875,7 @@ async def websocket_reports(websocket: WebSocket):
         finally:
             await websocket_manager.disconnect(websocket, "reports")
     except Exception as e:
+        logger.error(f"Failed to establish WebSocket connection for reports: {e}", exc_info=True)
         logger.error(f"Failed to establish WebSocket connection for reports: {e}", exc_info=True)
         try:
             await websocket.close()
@@ -1712,12 +1887,30 @@ async def websocket_dashboard(websocket: WebSocket):
     """WebSocket для обновлений главной панели в реальном времени."""
     try:
         await websocket_manager.connect(websocket, "dashboard")
+
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                    try:
+                        message_data = json.loads(data)
+                        message_type = message_data.get("type")
+                        
+                        if message_type == "connected":
+                            await websocket.send_json({"type": "connected", "status": "ok"})
+                        elif message_type == "pong":
+                            pass
+                        elif message_type == "ping":
+                            await websocket.send_json({"type": "pong"})
+                            
+                    except:
+                        pass
                 except asyncio.TimeoutError:
-                    await websocket.send_json({"type": "ping"})
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except:
+                        break
+
         except WebSocketDisconnect:
             pass
         except Exception as e:
@@ -1919,6 +2112,51 @@ async def cleanup_database_endpoint(keep_hikvision_id: str = "11", db: AsyncSess
         logger.error(f"Error during database cleanup: {e}", exc_info=True)
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error during cleanup: {str(e)}")
+
+@app.post("/admin/clear-events")
+async def clear_all_events(
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(require_operations_manager)
+):
+    """
+    Очистка всех событий посещаемости из базы данных.
+    Удаляет все события (attendance_events), но сохраняет:
+    - Пользователей (users)
+    - Смены (work_shifts)
+    - Привязки пользователей к сменам (user_shift_assignments)
+    """
+    from sqlalchemy import delete, select
+    
+    try:
+        # Подсчитываем количество событий перед удалением
+        count_result = await db.execute(select(models.AttendanceEvent))
+        total_events = len(count_result.scalars().all())
+        
+        logger.info(f"Starting events cleanup: {total_events} events to delete")
+        
+        # Удаляем все события
+        delete_result = await db.execute(delete(models.AttendanceEvent))
+        deleted_count = delete_result.rowcount
+        
+        await db.commit()
+        
+        logger.info(f"Events cleanup completed: deleted {deleted_count} events")
+        
+        return {
+            "success": True,
+            "message": f"Успешно удалено {deleted_count} событий посещаемости",
+            "stats": {
+                "deleted_events": deleted_count,
+                "users_preserved": True,
+                "shifts_preserved": True,
+                "assignments_preserved": True
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error during events cleanup: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при очистке событий: {str(e)}")
 
 @app.get("/devices/{device_id}/events")
 async def get_device_events(
@@ -2404,13 +2642,35 @@ async def receive_webhook_event(
         elif not timestamp:
             timestamp = datetime.now(timezone.utc)
 
+        # Определяем правильный тип события на основе предыдущих событий пользователя
+        from .utils.entry_exit import determine_entry_exit
+        employee_no = parsed_event.get("employee_no")
+        user_id = None
+        
+        
+        # Находим пользователя по hikvision_id для получения user_id
+        if employee_no:
+            user = await crud.get_user_by_hik_id(db, employee_no)
+            if user:
+                user_id = user.id
+        
+        # Определяем тип события на основе предыдущих событий
+        determined_event_type = await determine_entry_exit(
+            db=db,
+            user_id=user_id,
+            employee_no=employee_no,
+            terminal_ip=terminal_ip,
+            timestamp=timestamp
+        )
+        
+
         try:
             internal_event = schemas_internal.InternalEventCreate(
-                hikvision_id=parsed_event.get("employee_no"),
-                event_type=parsed_event.get("event_type", "unknown"),
+                hikvision_id=employee_no,
+                event_type=determined_event_type,  # Используем определенный тип события
                 terminal_ip=terminal_ip,
                 timestamp=timestamp,
-                employee_no=parsed_event.get("employee_no"),
+                employee_no=employee_no,
                 name=parsed_event.get("name"),
                 card_no=parsed_event.get("card_no"),
                 card_reader_id=parsed_event.get("card_reader_id"),
@@ -2425,7 +2685,9 @@ async def receive_webhook_event(
             }
 
         try:
+            
             db_event = await crud.create_event(db, internal_event)
+            
 
             event_notification = {
                 "id": db_event.id,
@@ -2437,8 +2699,9 @@ async def receive_webhook_event(
                 "terminal_ip": db_event.terminal_ip
             }
             try:
+                          {"event_id": event_notification.get("id"), "event_type": event_notification.get("type")})
                 await websocket_manager.notify_event_update(event_notification)
-            except Exception:
+            except Exception as e:
                 # Тихая обработка ошибок уведомления
                 pass
         except Exception as save_error:
@@ -2452,10 +2715,7 @@ async def receive_webhook_event(
             "message": "Event received and saved",
             "event_id": db_event.id,
             "employee_no": parsed_event.get("employee_no"),
-            "event_type": parsed_event.get("event_type_description"),
-            "debug": {
-                "parsed_event": parsed_event
-            }
+            "event_type": parsed_event.get("event_type_description")
         }
         
     except HTTPException:

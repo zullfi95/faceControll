@@ -2,11 +2,11 @@ import json
 import logging
 from typing import Dict, Any, Optional
 from fastapi import Request
-import os
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "")
+WEBHOOK_API_KEY = settings.webhook_api_key
 
 
 async def parse_multipart_event(request: Request) -> Optional[Dict[str, Any]]:

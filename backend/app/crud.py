@@ -3,6 +3,7 @@ from sqlalchemy.future import select
 from sqlalchemy import desc, func, and_, or_
 from . import models, schemas, schemas_internal
 from .utils.crypto import encrypt_password, decrypt_password
+from .enums import UserRole
 from datetime import datetime
 from typing import Optional, List, Tuple
 import logging
@@ -19,7 +20,7 @@ async def create_user(db: AsyncSession, user: schemas.UserCreate):
         hikvision_id=user.hikvision_id,
         full_name=user.full_name,
         department=user.department,
-        role=user.role or "cleaner"
+        role=user.role or UserRole.CLEANER.value
     )
     db.add(db_user)
     await db.commit()
@@ -56,6 +57,7 @@ async def create_event(db: AsyncSession, event: schemas_internal.InternalEventCr
     db.add(db_event)
     await db.commit()
     await db.refresh(db_event)
+    
     logger.info(f"[CREATE_EVENT] ===== EVENT CREATION COMPLETE =====")
     
     return db_event
@@ -174,17 +176,21 @@ async def update_user(db: AsyncSession, user_id: int, user_update: schemas.UserU
 
 async def delete_user(db: AsyncSession, user_id: int) -> bool:
     """Удаление пользователя по ID."""
-    user = await get_user_by_id(db, user_id)
-    if not user:
-        return False
-    
-    # Удаляем связанные события (cascade delete)
-    from sqlalchemy import delete
-    await db.execute(delete(models.AttendanceEvent).filter(models.AttendanceEvent.user_id == user_id))
-    
-    await db.delete(user)
-    await db.commit()
-    return True
+    try:
+        user = await get_user_by_id(db, user_id)
+        if not user:
+            return False
+        
+        # Удаляем связанные события и пользователя в одной транзакции
+        from sqlalchemy import delete
+        await db.execute(delete(models.AttendanceEvent).filter(models.AttendanceEvent.user_id == user_id))
+        await db.delete(user)
+        await db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting user {user_id}: {e}", exc_info=True)
+        await db.rollback()
+        raise
 
 async def delete_all_users(db: AsyncSession) -> int:
     """Удаление всех пользователей из базы данных."""

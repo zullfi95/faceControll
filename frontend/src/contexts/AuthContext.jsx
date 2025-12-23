@@ -31,7 +31,6 @@ export const AuthProvider = ({ children }) => {
       const response = await axios.get('/api/auth/me');
       setUser(response.data);
     } catch (error) {
-      console.error('Failed to fetch current user:', error);
       // Если токен невалидный, очищаем его
       if (error.response?.status === 401) {
         logout();

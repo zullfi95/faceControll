@@ -9,9 +9,9 @@ class Device(Base):
     __tablename__ = "devices"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)  # Название устройства (например, "Терминал Вход")
-    ip_address = Column(String, nullable=False, unique=True)
-    username = Column(String, nullable=False)
+    name = Column(String(255), nullable=False)  # Название устройства (например, "Терминал Вход")
+    ip_address = Column(String(45), nullable=False, unique=True)  # IPv6 может быть до 45 символов
+    username = Column(String(100), nullable=False)
     password_encrypted = Column(Text, nullable=False)  # Зашифрованный пароль
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -21,12 +21,12 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    hikvision_id = Column(String, unique=True, index=True)  # ID внутри терминала (например, "1001")
-    full_name = Column(String)
-    department = Column(String, nullable=True)
-    role = Column(String, nullable=True, default=UserRole.CLEANER.value)  # Роль пользователя
+    hikvision_id = Column(String(32), unique=True, index=True)  # ID внутри терминала (например, "1001")
+    full_name = Column(String(255))
+    department = Column(String(100), nullable=True)
+    role = Column(String(50), nullable=True, default=UserRole.CLEANER.value)  # Роль пользователя
     is_active = Column(Boolean, default=True)
-    photo_path = Column(String, nullable=True)  # Путь к сохраненному фото
+    photo_path = Column(String(500), nullable=True)  # Путь к сохраненному фото
     synced_to_device = Column(Boolean, default=False)  # Синхронизирован ли с устройством
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -40,17 +40,17 @@ class AttendanceEvent(Base):
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)  # Может быть NULL для событий без пользователя
 
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-    event_type = Column(String)  # "entry" (вход) или "exit" (выход) - базовый тип для совместимости
-    terminal_ip = Column(String)  # IP адрес терминала, с которого пришло событие
+    event_type = Column(String(20))  # "entry" (вход) или "exit" (выход) - базовый тип для совместимости
+    terminal_ip = Column(String(45), index=True)  # IP адрес терминала, с которого пришло событие
     
     # Расширенные поля из ISAPI событий
-    employee_no = Column(String, index=True, nullable=True)  # ID сотрудника из терминала
-    name = Column(String, nullable=True)  # Имя сотрудника
-    card_no = Column(String, nullable=True)  # Номер карты
-    card_reader_id = Column(String, nullable=True)  # ID считывателя карт
-    event_type_code = Column(String, nullable=True)  # Код типа события (majorEventType + subEventType)
-    event_type_description = Column(String, nullable=True)  # Текстовое описание типа события
-    remote_host_ip = Column(String, nullable=True)  # IP адрес удаленного хоста
+    employee_no = Column(String(32), index=True, nullable=True)  # ID сотрудника из терминала
+    name = Column(String(255), nullable=True)  # Имя сотрудника
+    card_no = Column(String(50), nullable=True)  # Номер карты
+    card_reader_id = Column(String(50), nullable=True)  # ID считывателя карт
+    event_type_code = Column(String(50), nullable=True)  # Код типа события (majorEventType + subEventType)
+    event_type_description = Column(String(255), nullable=True)  # Текстовое описание типа события
+    remote_host_ip = Column(String(45), nullable=True)  # IP адрес удаленного хоста
 
     # Связь с пользователем (lazy loading для оптимизации)
     user = relationship("User", back_populates="events", lazy="joined")
@@ -61,8 +61,8 @@ class WorkShift(Base):
     __tablename__ = "work_shifts"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)  # Название смены (например, "Утренняя смена", "Ночная смена")
-    description = Column(String, nullable=True)  # Описание смены
+    name = Column(String(255), nullable=False)  # Название смены (например, "Утренняя смена", "Ночная смена")
+    description = Column(String(500), nullable=True)  # Описание смены
     
     # Настройки по дням недели (0=Понедельник, 6=Воскресенье)
     # JSON структура: {"0": {"start": "09:00", "end": "18:00", "enabled": true}, ...}
@@ -80,8 +80,8 @@ class UserShiftAssignment(Base):
     __tablename__ = "user_shift_assignments"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    shift_id = Column(Integer, ForeignKey("work_shifts.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    shift_id = Column(Integer, ForeignKey("work_shifts.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # Дата начала действия привязки
     start_date = Column(DateTime(timezone=True), nullable=True)
@@ -101,11 +101,11 @@ class SystemUser(Base):
     __tablename__ = "system_users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=True)
-    hashed_password = Column(String, nullable=False)
-    full_name = Column(String, nullable=True)
-    role = Column(String, nullable=False, default=UserRole.CLEANER.value)
+    username = Column(String(100), unique=True, index=True, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=True)
+    hashed_password = Column(String(255), nullable=False)  # Bcrypt hash всегда 60 символов, но оставляем запас
+    full_name = Column(String(255), nullable=True)
+    role = Column(String(50), nullable=False, default=UserRole.CLEANER.value)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
