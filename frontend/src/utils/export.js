@@ -2,22 +2,60 @@ import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
-// Helper function to convert text to proper encoding for PDF
-// jsPDF requires proper UTF-8 encoding for Cyrillic characters
-const encodeText = (text) => {
-  if (!text) return '';
-  // Ensure text is properly encoded as UTF-8 string
-  // Convert to string and normalize Unicode characters
-  const str = String(text);
-  // Ensure proper UTF-8 encoding for Cyrillic
-  // For jsPDF, we need to ensure the text is in a format that can be rendered
-  // Standard fonts don't support Cyrillic, so characters may appear as squares
-  // This is a limitation of jsPDF's standard fonts
-  return str;
+// Helper function to format time
+const formatTime = (timeStr) => {
+  if (!timeStr) return 'N/A';
+  try {
+    const date = new Date(timeStr);
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Baku'
+    });
+  } catch (e) {
+    return timeStr;
+  }
+};
+
+// Helper function to format date
+const formatDate = (dateStr) => {
+  if (!dateStr) return 'N/A';
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: 'Asia/Baku'
+    });
+  } catch (e) {
+    return dateStr;
+  }
+};
+
+// Helper function to format hours
+const formatHours = (hours) => {
+  if (hours === null || hours === undefined || isNaN(hours)) return '0.00';
+  return hours.toFixed(2);
+};
+
+// Helper function to get status text
+const getStatusText = (status) => {
+  const statusMap = {
+    'Present': 'Present',
+    'Absent': 'Absent',
+    'Present (no exit)': 'Present (No Exit)'
+  };
+  return statusMap[status] || status || 'Unknown';
 };
 
 export const exportToPDF = (data, title, filename) => {
-  // Create PDF with proper settings for Unicode/Cyrillic support
+  if (!data || data.length === 0) {
+    return;
+  }
+
+  // Create PDF with proper settings
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -27,101 +65,207 @@ export const exportToPDF = (data, title, filename) => {
     floatPrecision: 16
   });
 
-  // IMPORTANT: Standard jsPDF fonts (helvetica, times, courier) do NOT support Cyrillic
-  // For full Cyrillic support, you need to add a custom font that supports Cyrillic
-  // This is a known limitation of jsPDF
-  // 
-  // Workaround: Use standard font but note that Cyrillic characters may not render correctly
-  // For production, consider adding a custom font with Cyrillic support
   doc.setFont('helvetica', 'normal');
 
-  // Add title - ensure UTF-8 encoding
-  doc.setFontSize(20);
-  // Use splitTextToSize for better text handling with Cyrillic
-  const titleLines = doc.splitTextToSize(encodeText(title), 180);
-  doc.text(titleLines, 14, 22);
+  // Header section with company branding
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  let yPos = 15;
 
-  // Добавляем дату (время Баку, UTC+4)
-  const dateStr = `Дата: ${new Date().toLocaleDateString('ru-RU', { timeZone: 'Asia/Baku' })}`;
-  doc.setFontSize(12);
-  const dateLines = doc.splitTextToSize(encodeText(dateStr), 180);
-  doc.text(dateLines, 14, 32);
+  // Header background
+  doc.setFillColor(19, 91, 147);
+  doc.rect(0, 0, pageWidth, 35, 'F');
 
-  // Column name mapping for better readability
+  // Title
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(18);
+  doc.setFont('helvetica', 'bold');
+  doc.text('ATTENDANCE REPORT', margin, yPos + 8);
+
+  // Report date
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  const reportDate = new Date().toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'Asia/Baku'
+  });
+  doc.text(`Generated: ${reportDate}`, margin, yPos + 15);
+
+  // Report period (if available in data)
+  if (data[0]?.report_date) {
+    doc.text(`Report Date: ${formatDate(data[0].report_date)}`, margin, yPos + 20);
+  }
+
+  // Reset text color
+  doc.setTextColor(0, 0, 0);
+  yPos = 45;
+
+  // Summary statistics
+  const totalEmployees = data.length;
+  const presentCount = data.filter(row => row.status === 'Present' || row.status === 'Present (no exit)').length;
+  const absentCount = data.filter(row => row.status === 'Absent').length;
+  const totalHours = data.reduce((sum, row) => sum + (row.hours_worked_total || 0), 0);
+
+  // Summary box
+  doc.setFillColor(245, 247, 250);
+  doc.roundedRect(margin, yPos, pageWidth - 2 * margin, 20, 2, 2, 'F');
+  
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SUMMARY', margin + 2, yPos + 7);
+  
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.text(`Total Employees: ${totalEmployees}`, margin + 2, yPos + 12);
+  doc.text(`Present: ${presentCount}`, margin + 50, yPos + 12);
+  doc.text(`Absent: ${absentCount}`, margin + 80, yPos + 12);
+  doc.text(`Total Hours: ${formatHours(totalHours)}`, margin + 110, yPos + 12);
+
+  yPos += 25;
+
+  // Column headers mapping
   const columnMapping = {
-    user: 'Сотрудник',
-    hikvision_id: 'ID Hikvision',
-    entry_time: 'Время входа',
-    exit_time: 'Время выхода',
-    hours_in_shift: 'Часы в смене',
-    hours_outside_shift: 'Часы вне смены',
-    hours_worked: 'Всего часов',
-    status: 'Статус'
+    user: 'Employee Name',
+    hikvision_id: 'Employee ID',
+    shift_start_time: 'Shift Start',
+    shift_duration_hours: 'Shift Duration',
+    entry_time: 'First Entry',
+    delay_minutes: 'Delay (min)',
+    last_authentication: 'Last Event',
+    hours_in_shift: 'Hours in Shift',
+    hours_outside_shift: 'Hours Outside',
+    hours_worked_total: 'Total Hours',
+    status: 'Status'
   };
 
-  // Prepare table data with localized headers
-  const originalHeaders = Object.keys(data[0] || {});
-  const headers = originalHeaders.map(key => encodeText(columnMapping[key] || key));
-  const rows = data.map(row => originalHeaders.map(key => {
-    const value = row[key];
-    // Форматируем поля времени (время Баку, UTC+4)
-    if ((key === 'entry_time' || key === 'exit_time') && value) {
-      return encodeText(new Date(value).toLocaleTimeString('ru-RU', { 
-        hour: '2-digit', 
-        minute: '2-digit',
-        timeZone: 'Asia/Baku'
-      }));
-    }
-    // Format numeric fields
-    if (typeof value === 'number' && key.includes('hours')) {
-      return encodeText(`${value.toFixed(2)} ч.`);
-    }
-    return encodeText(value);
-  }));
+  // Prepare table data
+  const columns = [
+    'user',
+    'hikvision_id',
+    'shift_start_time',
+    'entry_time',
+    'delay_minutes',
+    'hours_in_shift',
+    'hours_outside_shift',
+    'hours_worked_total',
+    'status'
+  ];
 
-  // Add table with proper encoding support for Cyrillic
-  // Important: For full Cyrillic support, you may need to add a custom font
-  // Standard fonts have limited Cyrillic support
+  const headers = columns.map(key => columnMapping[key] || key);
+  const rows = data.map(row => {
+    return columns.map(key => {
+      const value = row[key];
+      
+      if (key === 'entry_time' || key === 'last_authentication') {
+        return formatTime(value);
+      }
+      
+      if (key === 'delay_minutes') {
+        return value !== null && value !== undefined ? `${value}` : '—';
+      }
+      
+      if (key === 'hours_in_shift' || key === 'hours_outside_shift' || key === 'hours_worked_total') {
+        return formatHours(value);
+      }
+      
+      if (key === 'status') {
+        return getStatusText(value);
+      }
+      
+      if (key === 'shift_start_time') {
+        return value || '—';
+      }
+      
+      return value || '—';
+    });
+  });
+
+  // Add table with enhanced styling
   doc.autoTable({
     head: [headers],
     body: rows,
-    startY: 40,
+    startY: yPos,
+    margin: { left: margin, right: margin },
     styles: {
       fontSize: 8,
-      cellPadding: 3,
+      cellPadding: 2.5,
       font: 'helvetica',
       fontStyle: 'normal',
-      textColor: [0, 0, 0],
+      textColor: [51, 51, 51],
       overflow: 'linebreak',
       cellWidth: 'wrap',
       halign: 'left',
       valign: 'middle',
+      lineColor: [220, 220, 220],
+      lineWidth: 0.1,
     },
     headStyles: {
       fillColor: [19, 91, 147],
-      textColor: 255,
+      textColor: [255, 255, 255],
       fontStyle: 'bold',
       fontSize: 9,
       halign: 'left',
+      valign: 'middle',
+      lineColor: [19, 91, 147],
+      lineWidth: 0.1,
     },
     alternateRowStyles: {
-      fillColor: [245, 245, 245],
+      fillColor: [250, 250, 250],
     },
-    // Ensure proper encoding for Cyrillic characters
-    didParseCell: function (data) {
-      // Ensure all text is properly encoded as UTF-8
-      if (data.cell.text && Array.isArray(data.cell.text)) {
-        data.cell.text = data.cell.text.map(text => encodeText(text));
-      } else if (data.cell.text) {
-        data.cell.text = encodeText(data.cell.text);
+    columnStyles: {
+      0: { cellWidth: 35 }, // Employee Name
+      1: { cellWidth: 20 }, // Employee ID
+      2: { cellWidth: 20 }, // Shift Start
+      3: { cellWidth: 20 }, // First Entry
+      4: { cellWidth: 15 }, // Delay
+      5: { cellWidth: 18 }, // Hours in Shift
+      6: { cellWidth: 18 }, // Hours Outside
+      7: { cellWidth: 18 }, // Total Hours
+      8: { cellWidth: 20 }, // Status
+    },
+    didDrawCell: function (data) {
+      // Add status color coding
+      if (data.section === 'body' && data.column.index === 8) {
+        const status = data.cell.text[0];
+        if (status === 'Present') {
+          doc.setFillColor(220, 252, 231);
+          doc.rect(data.cell.x, data.cell.y, data.cell.width, data.cell.height, 'F');
+        } else if (status === 'Absent') {
+          doc.setFillColor(254, 226, 226);
+          doc.rect(data.cell.x, data.cell.y, data.cell.width, data.cell.height, 'F');
+        } else if (status === 'Present (No Exit)') {
+          doc.setFillColor(255, 237, 213);
+          doc.rect(data.cell.x, data.cell.y, data.cell.width, data.cell.height, 'F');
+        }
       }
     },
   });
 
+  // Footer
+  const finalY = doc.lastAutoTable.finalY || yPos;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  
+  doc.setFontSize(8);
+  doc.setTextColor(128, 128, 128);
+  doc.setFont('helvetica', 'italic');
+  doc.text(
+    `This report was generated automatically by Attendance Management System`,
+    margin,
+    pageHeight - 10
+  );
+  doc.text(
+    `Page 1 of 1`,
+    pageWidth - margin - 20,
+    pageHeight - 10
+  );
+
+  // Save PDF
   doc.save(`${filename}.pdf`);
 };
 
-// Функция для форматирования часов в формат "00:00"
+// Function to format hours to "HH:MM" format
 const formatHoursToTime = (hours) => {
   if (hours === null || hours === undefined || isNaN(hours)) {
     return '00:00';
@@ -132,12 +276,12 @@ const formatHoursToTime = (hours) => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 };
 
-// Функция для форматирования времени из ISO строки
-const formatTime = (timeStr) => {
-  if (!timeStr) return 'Не зафиксирован';
+// Function to format time from ISO string
+const formatTimeExcel = (timeStr) => {
+  if (!timeStr) return 'N/A';
   try {
     const date = new Date(timeStr);
-    return date.toLocaleString('ru-RU', {
+    return date.toLocaleString('en-US', {
       day: '2-digit',
       month: '2-digit',
       year: 'numeric',
@@ -155,90 +299,95 @@ export const exportToExcel = (data, filename) => {
     return;
   }
 
-  // Transform data for better Excel formatting with proper UTF-8 encoding
+  // Transform data for better Excel formatting
   const transformedData = data.map(row => {
     const newRow = {};
 
-    // Основные поля
-    newRow['Сотрудник'] = row.user || '';
-    newRow['ID Hikvision'] = row.hikvision_id || '';
+    // Main fields
+    newRow['Employee Name'] = row.user || '';
+    newRow['Employee ID'] = row.hikvision_id || '';
     
-    // Время начала смены
-    newRow['Время начала смены'] = row.shift_start_time || '—';
+    // Shift start time
+    newRow['Shift Start Time'] = row.shift_start_time || '—';
     
-    // Первый вход (время)
-    newRow['Первый вход (время)'] = row.entry_time ? formatTime(row.entry_time) : 'Не зафиксирован';
+    // First entry time
+    newRow['First Entry Time'] = row.entry_time ? formatTimeExcel(row.entry_time) : 'N/A';
     
-    // Опоздание
-    newRow['Опоздание'] = row.delay_minutes !== null && row.delay_minutes !== undefined 
-      ? `${row.delay_minutes} мин` 
+    // Delay
+    newRow['Delay (minutes)'] = row.delay_minutes !== null && row.delay_minutes !== undefined 
+      ? `${row.delay_minutes}` 
       : '—';
     
-    // Последняя аутентификация
-    newRow['Последняя аутентификация'] = row.last_authentication ? formatTime(row.last_authentication) : 'Не зафиксирован';
+    // Last authentication
+    newRow['Last Event Time'] = row.last_authentication ? formatTimeExcel(row.last_authentication) : 'N/A';
     
-    // Часов в смене (продолжительность смены)
+    // Shift duration
     if (row.shift_duration_hours !== null && row.shift_duration_hours !== undefined) {
-      newRow['Часов в смене'] = formatHoursToTime(row.shift_duration_hours);
+      newRow['Shift Duration'] = formatHoursToTime(row.shift_duration_hours);
     } else {
-      newRow['Часов в смене'] = '—';
+      newRow['Shift Duration'] = '—';
     }
     
-    // Время за смену
-    newRow['Время за смену'] = row.hours_in_shift !== null && row.hours_in_shift !== undefined
+    // Hours in shift
+    newRow['Hours in Shift'] = row.hours_in_shift !== null && row.hours_in_shift !== undefined
       ? formatHoursToTime(row.hours_in_shift)
       : '00:00';
     
-    // Время вне смены
-    newRow['Время вне смены'] = row.hours_outside_shift !== null && row.hours_outside_shift !== undefined
+    // Hours outside shift
+    newRow['Hours Outside Shift'] = row.hours_outside_shift !== null && row.hours_outside_shift !== undefined
       ? formatHoursToTime(row.hours_outside_shift)
       : '00:00';
     
-    // Зашел/Вышел
+    // Total hours worked
+    newRow['Total Hours Worked'] = row.hours_worked_total !== null && row.hours_worked_total !== undefined
+      ? formatHoursToTime(row.hours_worked_total)
+      : '00:00';
+    
+    // Entry/Exit type
     if (row.entry_exit_type) {
-      newRow['Зашел/Вышел'] = row.entry_exit_type === 'entry' ? 'Вход' : 'Выход';
+      newRow['Last Event Type'] = row.entry_exit_type === 'entry' ? 'Entry' : 'Exit';
     } else {
-      newRow['Зашел/Вышел'] = '—';
+      newRow['Last Event Type'] = '—';
     }
     
-    // Статус
+    // Status
     const statusMap = {
-      'Present': 'Присутствует',
-      'Absent': 'Отсутствует',
-      'Present (no exit)': 'Присутствует (нет выхода)'
+      'Present': 'Present',
+      'Absent': 'Absent',
+      'Present (no exit)': 'Present (No Exit)'
     };
-    newRow['Статус'] = statusMap[row.status] || row.status || '—';
+    newRow['Status'] = statusMap[row.status] || row.status || 'Unknown';
 
     return newRow;
   });
 
-  // Создаем worksheet с правильной кодировкой UTF-8
+  // Create worksheet
   const worksheet = XLSX.utils.json_to_sheet(transformedData);
   
-  // Настраиваем ширину колонок
+  // Configure column widths
   const colWidths = [
-    { wch: 20 }, // Сотрудник
-    { wch: 15 }, // ID Hikvision
-    { wch: 18 }, // Время начала смены
-    { wch: 22 }, // Первый вход (время)
-    { wch: 12 }, // Опоздание
-    { wch: 25 }, // Последняя аутентификация
-    { wch: 15 }, // Часов в смене
-    { wch: 15 }, // Время за смену
-    { wch: 15 }, // Время вне смены
-    { wch: 12 }, // Зашел/Вышел
-    { wch: 20 }  // Статус
+    { wch: 25 }, // Employee Name
+    { wch: 15 }, // Employee ID
+    { wch: 18 }, // Shift Start Time
+    { wch: 22 }, // First Entry Time
+    { wch: 15 }, // Delay
+    { wch: 22 }, // Last Event Time
+    { wch: 15 }, // Shift Duration
+    { wch: 15 }, // Hours in Shift
+    { wch: 18 }, // Hours Outside Shift
+    { wch: 18 }, // Total Hours Worked
+    { wch: 15 }, // Last Event Type
+    { wch: 20 }  // Status
   ];
   worksheet['!cols'] = colWidths;
   
-  // Создаем workbook с правильной кодировкой
+  // Create workbook
   const workbook = XLSX.utils.book_new();
   
-  // Добавляем лист с правильным именем (UTF-8)
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Отчет');
+  // Add sheet
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Attendance Report');
   
-  // Сохраняем файл с правильной кодировкой UTF-8
-  // XLSX.writeFile автоматически использует UTF-8 для имен файлов и содержимого
+  // Save file
   XLSX.writeFile(workbook, `${filename}.xlsx`, {
     bookType: 'xlsx',
     type: 'array',

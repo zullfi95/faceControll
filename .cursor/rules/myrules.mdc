@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+
+
+Whenever you receive a request or task:
+1. Analyze the problem or task presented to you.
+2. Explain the core issue and propose a clear solution plan.
+3. **Wait for my explicit command or confirmation** before proceeding with any actual code implementation or file changes.
+4. Only if I issue the command "proceed" or "execute", begin the implementation of the plan.
+5. **Always write clean, well-structured, optimized code at a Senior Developer level, adhering to best practices and idiomatic conventions.**

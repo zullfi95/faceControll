@@ -319,7 +319,7 @@ const EventsPage = () => {
                 }
                 aria-label="Опции экспорта событий"
               >
-                <DropdownItem onClick={() => exportToPDF(eventsData.events, 'События терминала', 'events')}>
+                <DropdownItem onClick={() => exportToPDF(eventsData.events, 'Terminal Events Report', 'events')}>
                   Экспорт в PDF
                 </DropdownItem>
                 <DropdownItem onClick={() => exportToExcel(eventsData.events, 'events')}>

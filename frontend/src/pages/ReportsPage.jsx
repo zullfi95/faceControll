@@ -224,7 +224,7 @@ const ReportsPage = () => {
               }
               aria-label="Опции экспорта"
             >
-              <DropdownItem onClick={() => exportToPDF(getExportData(), 'Отчет по сменам', 'shift-report')}>
+              <DropdownItem onClick={() => exportToPDF(getExportData(), 'Shift Attendance Report', 'shift-report')}>
                 Экспорт в PDF
               </DropdownItem>
               <DropdownItem onClick={() => exportToExcel(getExportData(), 'shift-report')}>

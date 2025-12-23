@@ -469,7 +469,12 @@ async def get_user_shift_assignments(
     active_only: bool = False
 ):
     """Получение привязок пользователей к сменам."""
-    query = select(models.UserShiftAssignment)
+    from sqlalchemy.orm import joinedload
+    
+    query = select(models.UserShiftAssignment).options(
+        joinedload(models.UserShiftAssignment.user),
+        joinedload(models.UserShiftAssignment.shift)
+    )
     
     if user_id:
         query = query.filter(models.UserShiftAssignment.user_id == user_id)
@@ -480,7 +485,7 @@ async def get_user_shift_assignments(
     
     query = query.order_by(models.UserShiftAssignment.created_at.desc())
     result = await db.execute(query)
-    return result.scalars().all()
+    return result.unique().scalars().all()
 
 async def update_user_shift_assignment(
     db: AsyncSession,

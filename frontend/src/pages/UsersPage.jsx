@@ -28,9 +28,6 @@ const UsersPage = () => {
   const [editingUser, setEditingUser] = useState(null);
   const [isCreating, setIsCreating] = useState(false);
   const [creationStep, setCreationStep] = useState('');
-  const [statisticsUser, setStatisticsUser] = useState(null);
-  const [userStatistics, setUserStatistics] = useState(null);
-  const [isLoadingStatistics, setIsLoadingStatistics] = useState(false);
   
   // Face capture from terminal states
   const [isCapturingFromTerminal, setIsCapturingFromTerminal] = useState(false);
@@ -107,11 +104,12 @@ const UsersPage = () => {
     }
   };
 
-  const { data: terminalUsers, isLoading: isLoadingTerminal, refetch: refetchTerminal } = useQuery({
+  const { data: terminalUsersData, isLoading: isLoadingTerminal, refetch: refetchTerminal } = useQuery({
     queryKey: ['terminal-users', selectedDeviceId],
     queryFn: async () => {
       if (!selectedDeviceId) return null;
       const res = await axios.get(`/api/devices/${selectedDeviceId}/terminal-users`);
+      // API теперь возвращает объект с пагинацией: { total, skip, limit, users }
       return res.data;
     },
     enabled: !!selectedDeviceId,
@@ -314,24 +312,10 @@ const UsersPage = () => {
     setSyncConfirm(userId);
   };
 
-  // Загрузка статистики пользователя
-  const handleViewStatistics = async (user) => {
-    setStatisticsUser(user);
-    setIsLoadingStatistics(true);
-    try {
-      const res = await axios.get(`/api/users/${user.id}/statistics`);
-      setUserStatistics(res.data);
-    } catch (error) {
-      showToast.error('Ошибка загрузки статистики: ' + (error.response?.data?.detail || error.message));
-      setStatisticsUser(null);
-    } finally {
-      setIsLoadingStatistics(false);
-    }
-  };
 
   // Автосинхронизация пользователей с фото
   useEffect(() => {
-    if (!users || users.length === 0) return;
+    if (!users || !Array.isArray(users) || users.length === 0) return;
     
     // Автоматически синхронизируем пользователей с фото, которые еще не синхронизированы
     const usersToSync = users.filter(user => 
@@ -363,20 +347,24 @@ const UsersPage = () => {
     }
     
     // Очищаем набор от пользователей, которые уже синхронизированы в БД
-    users.forEach(user => {
-      if (user.synced_to_device && syncingUsersRef.current.has(user.id)) {
-        syncingUsersRef.current.delete(user.id);
-      }
-    });
+    if (Array.isArray(users)) {
+      users.forEach(user => {
+        if (user.synced_to_device && syncingUsersRef.current.has(user.id)) {
+          syncingUsersRef.current.delete(user.id);
+        }
+      });
+    }
   }, [users, queryClient]);
 
   // Объединяем пользователей из БД и терминала
   const mergedUsers = useMemo(() => {
-    if (!users) return [];
+    // Убеждаемся, что users - это массив
+    const dbUsers = Array.isArray(users) ? users : [];
+    if (dbUsers.length === 0 && !terminalUsersData) return [];
     
     // Создаем Map для быстрого поиска пользователей из БД по hikvision_id
     const dbUsersMap = new Map();
-    users.forEach(user => {
+    dbUsers.forEach(user => {
       dbUsersMap.set(user.hikvision_id, user);
     });
     
@@ -385,7 +373,7 @@ const UsersPage = () => {
     const processedIds = new Set();
     
     // Сначала добавляем пользователей из БД
-    users.forEach(user => {
+    dbUsers.forEach(user => {
       merged.push({
         ...user,
         source: 'db',
@@ -395,8 +383,18 @@ const UsersPage = () => {
     });
     
     // Затем добавляем пользователей с терминала, которых нет в БД
-    if (terminalUsers && selectedDeviceId) {
-      terminalUsers.forEach(terminalUser => {
+    // terminalUsersData теперь может быть объектом с пагинацией { total, skip, limit, users } или массивом
+    let terminalUsersArray = [];
+    if (terminalUsersData) {
+      if (Array.isArray(terminalUsersData)) {
+        terminalUsersArray = terminalUsersData;
+      } else if (terminalUsersData.users && Array.isArray(terminalUsersData.users)) {
+        terminalUsersArray = terminalUsersData.users;
+      }
+    }
+    
+    if (terminalUsersArray.length > 0 && selectedDeviceId) {
+      terminalUsersArray.forEach(terminalUser => {
         const employeeNo = terminalUser.employeeNo;
         if (employeeNo && !processedIds.has(employeeNo)) {
           merged.push({
@@ -429,7 +427,7 @@ const UsersPage = () => {
     }
     
     return merged;
-  }, [users, terminalUsers, selectedDeviceId]);
+  }, [users, terminalUsersData, selectedDeviceId]);
 
   if (isLoading) {
     return (
@@ -566,16 +564,6 @@ const UsersPage = () => {
                           Фото
                         </Button>
                         <Button
-                          variant="primary"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleViewStatistics(user);
-                          }}
-                        >
-                          Статистика
-                        </Button>
-                        <Button
                           variant="success"
                           size="sm"
                           onClick={(e) => {
@@ -669,13 +657,6 @@ const UsersPage = () => {
                               onClick={() => setEditingUser(user)}
                             >
                               Фото
-                            </Button>
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              onClick={() => handleViewStatistics(user)}
-                            >
-                              Статистика
                             </Button>
                         <Button
                           variant="success"
@@ -990,60 +971,6 @@ const UsersPage = () => {
         variant="info"
       />
 
-      {/* Модалка статистики пользователя */}
-      <Modal
-        isOpen={!!statisticsUser}
-        onClose={() => {
-          setStatisticsUser(null);
-          setUserStatistics(null);
-        }}
-        title={`Статистика: ${statisticsUser?.full_name || statisticsUser?.hikvision_id || 'Пользователь'}`}
-      >
-        {isLoadingStatistics ? (
-          <div className="flex justify-center items-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          </div>
-        ) : userStatistics ? (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">Всего событий</div>
-                <div className="text-2xl font-bold text-gray-900">{userStatistics.total_events}</div>
-              </Card>
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">Входов</div>
-                <div className="text-2xl font-bold text-green-600">{userStatistics.total_entry_events}</div>
-              </Card>
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">Выходов</div>
-                <div className="text-2xl font-bold text-orange-600">{userStatistics.total_exit_events}</div>
-              </Card>
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">Сегодня</div>
-                <div className="text-2xl font-bold text-blue-600">{userStatistics.events_today}</div>
-              </Card>
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">За 7 дней</div>
-                <div className="text-2xl font-bold text-purple-600">{userStatistics.events_last_7_days}</div>
-              </Card>
-              <Card className="p-4">
-                <div className="text-sm text-gray-500 mb-1">За 30 дней</div>
-                <div className="text-2xl font-bold text-indigo-600">{userStatistics.events_last_30_days}</div>
-              </Card>
-            </div>
-            {userStatistics.first_event_date && (
-              <div className="text-sm text-gray-600">
-                <div>Первое событие: {new Date(userStatistics.first_event_date).toLocaleString('ru-RU')}</div>
-                {userStatistics.last_event_date && (
-                  <div>Последнее событие: {new Date(userStatistics.last_event_date).toLocaleString('ru-RU')}</div>
-                )}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="text-center py-8 text-gray-500">Нет данных</div>
-        )}
-      </Modal>
     </div>
   );
 };

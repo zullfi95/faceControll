@@ -9,6 +9,7 @@ import Badge from '../components/ui/Badge';
 import Card from '../components/ui/Card';
 import Skeleton from '../components/ui/Skeleton';
 import showToast from '../utils/toast';
+import { useQuery } from '@tanstack/react-query';
 
 function UsersManagementPage() {
   const { isOperationsManager } = useAuth();
@@ -22,6 +23,18 @@ function UsersManagementPage() {
   const [editingTerminalUser, setEditingTerminalUser] = useState(null);
   const [roles, setRoles] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Состояния для статистики
+  const [statisticsUser, setStatisticsUser] = useState(null);
+  const [userStatistics, setUserStatistics] = useState(null);
+  const [isLoadingStatistics, setIsLoadingStatistics] = useState(false);
+
+  // Состояния для привязки к смене
+  const [showShiftAssignmentModal, setShowShiftAssignmentModal] = useState(false);
+  const [selectedUserForShift, setSelectedUserForShift] = useState(null);
+  const [selectedShiftId, setSelectedShiftId] = useState('');
+  const [shiftStartDate, setShiftStartDate] = useState('');
+  const [shiftEndDate, setShiftEndDate] = useState('');
 
   // Данные для системных пользователей
   const [systemUsers, setSystemUsers] = useState([]);
@@ -41,6 +54,16 @@ function UsersManagementPage() {
     password: '',
     role: 'cleaner',
     is_active: true,
+  });
+
+  // Загрузка списка смен
+  const { data: workShifts = [], isLoading: isLoadingShifts } = useQuery({
+    queryKey: ['work-shifts'],
+    queryFn: async () => {
+      const res = await axios.get('/api/work-shifts/?active_only=true');
+      return res.data;
+    },
+    enabled: isOperationsManager(),
   });
 
   useEffect(() => {
@@ -198,6 +221,57 @@ function UsersManagementPage() {
     return role ? role.display_name : roleValue;
   };
 
+  // Загрузка статистики пользователя
+  const handleViewStatistics = async (user) => {
+    setStatisticsUser(user);
+    setIsLoadingStatistics(true);
+    try {
+      const res = await axios.get(`/api/users/${user.id}/statistics`);
+      setUserStatistics(res.data);
+    } catch (error) {
+      showToast.error('Ошибка загрузки статистики: ' + (error.response?.data?.detail || error.message));
+      setStatisticsUser(null);
+    } finally {
+      setIsLoadingStatistics(false);
+    }
+  };
+
+  // Обработка привязки к смене
+  const handleAssignToShift = (user) => {
+    setSelectedUserForShift(user);
+    setSelectedShiftId('');
+    setShiftStartDate('');
+    setShiftEndDate('');
+    setShowShiftAssignmentModal(true);
+  };
+
+  const handleShiftAssignmentSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedShiftId || !selectedUserForShift) {
+      showToast.error('Выберите смену');
+      return;
+    }
+
+    try {
+      await axios.post('/api/user-shift-assignments/', {
+        user_id: selectedUserForShift.id,
+        shift_id: parseInt(selectedShiftId),
+        start_date: shiftStartDate || null,
+        end_date: shiftEndDate || null,
+        is_active: true,
+      });
+      
+      showToast.success('Пользователь успешно привязан к смене');
+      setShowShiftAssignmentModal(false);
+      setSelectedUserForShift(null);
+      setSelectedShiftId('');
+      setShiftStartDate('');
+      setShiftEndDate('');
+    } catch (error) {
+      showToast.error(error.response?.data?.detail || 'Ошибка привязки к смене');
+    }
+  };
+
   const filteredTerminalUsers = terminalUsers.filter((user) => {
     const searchLower = searchTerm.toLowerCase();
     return (
@@ -338,12 +412,26 @@ function UsersManagementPage() {
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                          <button
-                            onClick={() => handleTerminalEdit(user)}
-                            className="text-[rgb(19,91,147)] hover:text-[rgb(15,73,118)]"
-                          >
-                            Изменить роль
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleTerminalEdit(user)}
+                              className="text-[rgb(19,91,147)] hover:text-[rgb(15,73,118)]"
+                            >
+                              Изменить роль
+                            </button>
+                            <button
+                              onClick={() => handleViewStatistics(user)}
+                              className="text-blue-600 hover:text-blue-800"
+                            >
+                              Статистика
+                            </button>
+                            <button
+                              onClick={() => handleAssignToShift(user)}
+                              className="text-green-600 hover:text-green-800"
+                            >
+                              Привязать к смене
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -692,6 +780,169 @@ function UsersManagementPage() {
         cancelText="Отмена"
         variant="error"
       />
+
+      {/* Модальное окно статистики пользователя */}
+      <Modal
+        isOpen={!!statisticsUser}
+        onClose={() => {
+          setStatisticsUser(null);
+          setUserStatistics(null);
+        }}
+        title={`Статистика: ${statisticsUser?.full_name || statisticsUser?.hikvision_id || 'Пользователь'}`}
+      >
+        {isLoadingStatistics ? (
+          <div className="flex justify-center items-center py-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          </div>
+        ) : userStatistics ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">Всего событий</div>
+                <div className="text-2xl font-bold text-gray-900">{userStatistics.total_events}</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">Входов</div>
+                <div className="text-2xl font-bold text-green-600">{userStatistics.total_entry_events}</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">Выходов</div>
+                <div className="text-2xl font-bold text-orange-600">{userStatistics.total_exit_events}</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">Сегодня</div>
+                <div className="text-2xl font-bold text-blue-600">{userStatistics.events_today}</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">За 7 дней</div>
+                <div className="text-2xl font-bold text-purple-600">{userStatistics.events_last_7_days}</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-sm text-gray-500 mb-1">За 30 дней</div>
+                <div className="text-2xl font-bold text-indigo-600">{userStatistics.events_last_30_days}</div>
+              </Card>
+            </div>
+            {userStatistics.first_event_date && (
+              <div className="text-sm text-gray-600">
+                <div>Первое событие: {new Date(userStatistics.first_event_date).toLocaleString('ru-RU')}</div>
+                {userStatistics.last_event_date && (
+                  <div>Последнее событие: {new Date(userStatistics.last_event_date).toLocaleString('ru-RU')}</div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500">Нет данных</div>
+        )}
+      </Modal>
+
+      {/* Модальное окно привязки к смене */}
+      {showShiftAssignmentModal && (
+        <div className="fixed z-10 inset-0 overflow-y-auto">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              onClick={() => {
+                setShowShiftAssignmentModal(false);
+                setSelectedUserForShift(null);
+                setSelectedShiftId('');
+                setShiftStartDate('');
+                setShiftEndDate('');
+              }}
+            ></div>
+
+            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+              <form onSubmit={handleShiftAssignmentSubmit}>
+                <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                  <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                    Привязать пользователя к смене
+                  </h3>
+
+                  <div className="mb-4">
+                    <p className="text-sm text-gray-600 mb-2">
+                      <strong>Пользователь:</strong> {selectedUserForShift?.full_name || selectedUserForShift?.hikvision_id}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      <strong>ID:</strong> {selectedUserForShift?.hikvision_id}
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Смена *</label>
+                      {isLoadingShifts ? (
+                        <div className="text-sm text-gray-500">Загрузка смен...</div>
+                      ) : (
+                        <select
+                          value={selectedShiftId}
+                          onChange={(e) => setSelectedShiftId(e.target.value)}
+                          className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                          required
+                        >
+                          <option value="">Выберите смену</option>
+                          {workShifts.map((shift) => (
+                            <option key={shift.id} value={shift.id}>
+                              {shift.name} {shift.description ? `- ${shift.description}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Дата начала (необязательно)
+                      </label>
+                      <input
+                        type="date"
+                        value={shiftStartDate}
+                        onChange={(e) => setShiftStartDate(e.target.value)}
+                        className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Если не указано, привязка действует с сегодняшнего дня</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Дата окончания (необязательно)
+                      </label>
+                      <input
+                        type="date"
+                        value={shiftEndDate}
+                        onChange={(e) => setShiftEndDate(e.target.value)}
+                        className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Если не указано, привязка действует бессрочно</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                  <button
+                    type="submit"
+                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    Привязать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowShiftAssignmentModal(false);
+                      setSelectedUserForShift(null);
+                      setSelectedShiftId('');
+                      setShiftStartDate('');
+                      setShiftEndDate('');
+                    }}
+                    className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

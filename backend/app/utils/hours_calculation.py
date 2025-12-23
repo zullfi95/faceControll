@@ -40,9 +40,13 @@ async def get_user_shift_for_date(db: AsyncSession, user_id: int, date: datetime
         Активная смена или None если нет активной смены
     """
     try:
+        from sqlalchemy.orm import joinedload
+        
         # Находим активную привязку пользователя к смене на указанную дату
+        # Используем joinedload для явной загрузки связанной смены
         result = await db.execute(
             select(models.UserShiftAssignment)
+            .options(joinedload(models.UserShiftAssignment.shift))
             .join(models.WorkShift)
             .filter(
                 and_(
@@ -61,8 +65,8 @@ async def get_user_shift_for_date(db: AsyncSession, user_id: int, date: datetime
             )
         )
 
-        assignment = result.scalars().first()
-        if assignment:
+        assignment = result.unique().scalars().first()
+        if assignment and assignment.shift:
             return assignment.shift
 
         return None

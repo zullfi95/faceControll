@@ -2699,7 +2699,6 @@ async def receive_webhook_event(
                 "terminal_ip": db_event.terminal_ip
             }
             try:
-                          {"event_id": event_notification.get("id"), "event_type": event_notification.get("type")})
                 await websocket_manager.notify_event_update(event_notification)
             except Exception as e:
                 # Тихая обработка ошибок уведомления
