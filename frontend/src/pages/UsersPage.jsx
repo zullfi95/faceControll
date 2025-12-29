@@ -17,6 +17,7 @@ import LiveRegion from '../components/accessibility/LiveRegion';
 import showToast from '../utils/toast';
 import { UserGroupIcon, PlusIcon } from '@heroicons/react/24/outline';
 import { useEventsWebSocket } from '../hooks/useWebSocket';
+import DeviceSyncDialog from '../components/DeviceSyncDialog';
 
 const UsersPage = () => {
   const queryClient = useQueryClient();
@@ -41,6 +42,8 @@ const UsersPage = () => {
   // Состояния для подтверждений (должны быть объявлены до всех хуков)
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [syncConfirm, setSyncConfirm] = useState(null);
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
+  const [syncDialogUser, setSyncDialogUser] = useState(null);
   
   // Ref для отслеживания пользователей, которые уже синхронизируются
   const syncingUsersRef = useRef(new Set());
@@ -308,8 +311,9 @@ const UsersPage = () => {
     uploadPhotoMutation.mutate({ userId, file: selectedPhoto });
   };
 
-  const handleSync = (userId) => {
-    setSyncConfirm(userId);
+  const handleSync = (user) => {
+    setSyncDialogUser(user);
+    setSyncDialogOpen(true);
   };
 
 
@@ -661,7 +665,7 @@ const UsersPage = () => {
                         <Button
                           variant="success"
                           size="sm"
-                          onClick={() => handleSync(user.id)}
+                          onClick={() => handleSync(user)}
                           disabled={!user.photo_path || syncMutation.isPending}
                           loading={syncMutation.isPending}
                           aria-label={`Синхронизировать ${user.full_name || user.hikvision_id} с терминалом`}
@@ -745,7 +749,7 @@ const UsersPage = () => {
                           <Button
                             variant="success"
                             size="sm"
-                            onClick={() => handleSync(user.id)}
+                            onClick={() => handleSync(user)}
                             disabled={!user.photo_path || syncMutation.isPending}
                             loading={syncMutation.isPending}
                           >
@@ -969,6 +973,17 @@ const UsersPage = () => {
         confirmText="Синхронизировать"
         cancelText="Отмена"
         variant="info"
+      />
+
+      {/* Диалог синхронизации на несколько устройств */}
+      <DeviceSyncDialog
+        userId={syncDialogUser?.id}
+        userName={syncDialogUser?.full_name || syncDialogUser?.hikvision_id || 'Неизвестный'}
+        isOpen={syncDialogOpen}
+        onClose={() => {
+          setSyncDialogOpen(false);
+          setSyncDialogUser(null);
+        }}
       />
 
     </div>

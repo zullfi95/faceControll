@@ -10,7 +10,8 @@ import Input from '../components/ui/Input';
 import EmptyState from '../components/ui/EmptyState';
 import Button from '../components/ui/Button';
 import Dropdown, { DropdownItem } from '../components/ui/Dropdown';
-import { ChartBarIcon, ArrowDownTrayIcon, ChevronDownIcon, WifiIcon, ExclamationTriangleIcon, ChevronRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import DataTable from '../components/ui/DataTable';
+import { ChartBarIcon, ArrowDownTrayIcon, ChevronDownIcon, WifiIcon, ExclamationTriangleIcon, ChevronRightIcon, XMarkIcon, Squares2X2Icon, TableCellsIcon } from '@heroicons/react/24/outline';
 import { exportToPDF, exportToExcel } from '../utils/export';
 import { useReportsWebSocket } from '../hooks/useWebSocket';
 
@@ -21,6 +22,7 @@ const ReportsPage = () => {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [selectedShift, setSelectedShift] = useState(null);
   const [selectedDay, setSelectedDay] = useState(null);
+  const [viewMode, setViewMode] = useState('cards'); // 'cards' | 'table'
 
   const { data: reportData, isLoading, refetch, error: reportError } = useQuery({
     queryKey: ['report', date],
@@ -111,6 +113,161 @@ const ReportsPage = () => {
     const config = variants[status] || { variant: 'default', label: status };
     return <Badge variant={config.variant}>{config.label}</Badge>;
   };
+
+  // Преобразуем данные для табличного вида
+  const flattenReportData = () => {
+    if (!reportData?.shifts) return [];
+
+    const flattenedData = [];
+
+    reportData.shifts.forEach(shift => {
+      shift.days.forEach(day => {
+        day.employees.forEach(employee => {
+          flattenedData.push({
+            id: `${employee.user_id}_${shift.shift_id}_${day.day_of_week}`,
+            user_id: employee.user_id,
+            user_name: employee.user_name,
+            hikvision_id: employee.hikvision_id,
+            shift_id: shift.shift_id,
+            shift_name: shift.shift_name.trim(), // Убираем пробелы
+            shift_description: shift.shift_description || '',
+            day_of_week: day.day_of_week,
+            day_name: day.day_name.trim(), // Убираем пробелы
+            is_active: day.is_active,
+            shift_start_time: employee.shift_start_time,
+            shift_duration_hours: employee.shift_duration_hours,
+            first_entry_time: employee.first_entry_time,
+            delay_minutes: employee.delay_minutes,
+            last_entry_exit_time: employee.last_entry_exit_time,
+            last_event_type: employee.last_event_type,
+            hours_worked_total: employee.hours_worked_total,
+            hours_in_shift: employee.hours_in_shift,
+            hours_outside_shift: employee.hours_outside_shift,
+            status: employee.status,
+            schedule_start: day.schedule?.start || null,
+            schedule_end: day.schedule?.end || null
+          });
+        });
+      });
+    });
+
+
+    return flattenedData;
+  };
+
+  // Определяем колонки для таблицы
+  const tableColumns = [
+    {
+      key: 'user_name',
+      label: 'Сотрудник',
+      sortable: true,
+      filterType: 'text',
+      render: (value, row) => (
+        <div>
+          <div className="font-medium text-gray-900">{value}</div>
+          <div className="text-sm text-gray-500">{row.hikvision_id}</div>
+        </div>
+      )
+    },
+    {
+      key: 'shift_name',
+      label: 'Смена',
+      sortable: true,
+      filterType: 'select',
+      render: (value, row) => (
+        <div>
+          <div className="font-medium">{value}</div>
+          {row.shift_description && (
+            <div className="text-sm text-gray-500">{row.shift_description}</div>
+          )}
+        </div>
+      )
+    },
+    {
+      key: 'day_name',
+      label: 'День',
+      sortable: true,
+      filterType: 'select'
+    },
+    {
+      key: 'shift_start_time',
+      label: 'Начало смены',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => value || '—'
+    },
+    {
+      key: 'first_entry_time',
+      label: 'Первый вход',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => formatTime(value)
+    },
+    {
+      key: 'delay_minutes',
+      label: 'Опоздание',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => value !== null && value !== undefined ? `${value} мин` : '—'
+    },
+    {
+      key: 'last_entry_exit_time',
+      label: 'Последняя активность',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => formatTime(value)
+    },
+    {
+      key: 'shift_duration_hours',
+      label: 'Часов в смене',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => value !== null && value !== undefined ? formatHoursToTime(value) : '—'
+    },
+    {
+      key: 'hours_in_shift',
+      label: 'Время в смене',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => formatHoursToTime(value)
+    },
+    {
+      key: 'hours_outside_shift',
+      label: 'Время вне смены',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => formatHoursToTime(value)
+    },
+    {
+      key: 'hours_worked_total',
+      label: 'Всего часов',
+      sortable: true,
+      filterType: 'text',
+      render: (value) => value !== null && value !== undefined ? formatHoursToTime(value) : formatHoursToTime(0)
+    },
+    {
+      key: 'last_event_type',
+      label: 'Последний тип',
+      sortable: true,
+      filterType: 'select',
+      render: (value, row) => (
+        value ? (
+          <Badge variant={value === 'entry' ? 'success' : 'warning'}>
+            {formatEventType(value)}
+          </Badge>
+        ) : (
+          <span className="text-gray-400">—</span>
+        )
+      )
+    },
+    {
+      key: 'status',
+      label: 'Статус',
+      sortable: true,
+      filterType: 'select',
+      render: (value) => getStatusBadge(value)
+    }
+  ];
 
   // Преобразуем данные для экспорта
   const getExportData = () => {
@@ -207,6 +364,32 @@ const ReportsPage = () => {
             )}
             {isConnected ? 'Онлайн' : 'Оффлайн'}
           </div>
+          <div className="flex items-center bg-white border border-gray-300 rounded-lg p-1">
+            <button
+              onClick={() => setViewMode('cards')}
+              className={`p-2 rounded-md transition-colors ${
+                viewMode === 'cards'
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'text-gray-500 hover:bg-gray-100'
+              }`}
+              aria-label="Показать в виде карточек"
+              title="Показать в виде карточек"
+            >
+              <Squares2X2Icon className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setViewMode('table')}
+              className={`p-2 rounded-md transition-colors ${
+                viewMode === 'table'
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'text-gray-500 hover:bg-gray-100'
+              }`}
+              aria-label="Показать в виде таблицы"
+              title="Показать в виде таблицы"
+            >
+              <TableCellsIcon className="h-4 w-4" />
+            </button>
+          </div>
           <Input
             type="date"
             value={date}
@@ -241,6 +424,16 @@ const ReportsPage = () => {
           title="Нет данных"
           description="На выбранную дату нет активных смен или сотрудников"
         />
+      ) : viewMode === 'table' ? (
+        <Card className="p-6">
+          <DataTable
+            columns={tableColumns}
+            data={flattenReportData()}
+            emptyMessage="Нет данных для отображения"
+            aria-label="Таблица отчетов по посещаемости"
+            key={`table-${date}`} // Добавляем key для перерисовки при изменении даты
+          />
+        </Card>
       ) : (
         <div className="space-y-6">
           {shifts.map((shift) => (

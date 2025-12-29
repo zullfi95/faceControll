@@ -246,12 +246,17 @@ const EventsPage = () => {
               }}
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)] shadow-soft"
             >
-              <option value="">Выберите устройство</option>
-              {devices?.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.name} ({device.ip_address})
-                </option>
-              ))}
+              <option value="">Все терминалы</option>
+              {devices?.map((device) => {
+                const icon = device.device_type === 'entry' ? '🚪' :
+                             device.device_type === 'exit' ? '🚶' :
+                             device.device_type === 'both' ? '🔄' : '📍';
+                return (
+                  <option key={device.id} value={device.id}>
+                    {icon} {device.name} - {device.location || device.ip_address}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -378,9 +383,37 @@ const EventsPage = () => {
                         sortable: true,
                       },
                       {
+                        key: 'device_name',
+                        label: 'Terminal',
+                        width: '12%',
+                        render: (_, event) => {
+                          // Ищем устройство, чтобы получить его тип
+                          const device = devices?.find(d => d.name === event.device_name);
+                          const deviceType = device?.device_type || 'other';
+                          
+                          const bgColor = deviceType === 'entry' ? 'bg-green-50' :
+                                         deviceType === 'exit' ? 'bg-orange-50' :
+                                         deviceType === 'both' ? 'bg-blue-50' :
+                                         'bg-gray-50';
+                          const textColor = deviceType === 'entry' ? 'text-green-700' :
+                                           deviceType === 'exit' ? 'text-orange-700' :
+                                           deviceType === 'both' ? 'text-blue-700' :
+                                           'text-gray-700';
+                          const icon = deviceType === 'entry' ? '🚪' :
+                                      deviceType === 'exit' ? '🚶' :
+                                      deviceType === 'both' ? '🔄' : '📍';
+                          
+                          return (
+                            <span className={`text-xs px-2 py-1 rounded ${bgColor} ${textColor}`}>
+                              {icon} {event.device_name || 'N/A'}
+                            </span>
+                          );
+                        },
+                      },
+                      {
                         key: 'card_no',
                         label: 'Card No.',
-                        width: '10%',
+                        width: '8%',
                       },
                       {
                         key: 'card_reader_id',
@@ -441,6 +474,9 @@ const EventsPage = () => {
                           Name
                         </th>
                         <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
+                          Terminal
+                        </th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
                           Card No.
                         </th>
                         <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" role="columnheader">
@@ -471,6 +507,30 @@ const EventsPage = () => {
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                             {event.name || '--'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm">
+                            {(() => {
+                              const device = devices?.find(d => d.name === event.device_name);
+                              const deviceType = device?.device_type || 'other';
+                              
+                              const bgColor = deviceType === 'entry' ? 'bg-green-50' :
+                                             deviceType === 'exit' ? 'bg-orange-50' :
+                                             deviceType === 'both' ? 'bg-blue-50' :
+                                             'bg-gray-50';
+                              const textColor = deviceType === 'entry' ? 'text-green-700' :
+                                               deviceType === 'exit' ? 'text-orange-700' :
+                                               deviceType === 'both' ? 'text-blue-700' :
+                                               'text-gray-700';
+                              const icon = deviceType === 'entry' ? '🚪' :
+                                          deviceType === 'exit' ? '🚶' :
+                                          deviceType === 'both' ? '🔄' : '📍';
+                              
+                              return (
+                                <span className={`text-xs px-2 py-1 rounded ${bgColor} ${textColor}`}>
+                                  {icon} {event.device_name || 'N/A'}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                             {event.card_no || '--'}

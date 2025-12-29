@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import Button from '../components/ui/Button';
@@ -8,17 +8,24 @@ import ConfirmDialog from '../components/ui/ConfirmDialog';
 import Badge from '../components/ui/Badge';
 import Skeleton from '../components/ui/Skeleton';
 import showToast from '../utils/toast';
+import { MapPinIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 
 const DeviceSettingsPage = () => {
   const queryClient = useQueryClient();
   const [isAddingDevice, setIsAddingDevice] = useState(false);
   const [isEditingDevice, setIsEditingDevice] = useState(false);
+  const [editingDeviceId, setEditingDeviceId] = useState(null);
   const [editingDeviceData, setEditingDeviceData] = useState(null);
+  const [expandedLocations, setExpandedLocations] = useState(new Set());
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [newDevice, setNewDevice] = useState({
     name: '',
     ip_address: '',
     username: 'admin',
-    password: ''
+    password: '',
+    device_type: 'other',
+    location: '',
+    priority: 0
   });
 
   // Получение списка устройств
@@ -30,29 +37,94 @@ const DeviceSettingsPage = () => {
     }
   });
 
-  // Проверка статуса устройства
-  const { data: deviceStatus, refetch: checkStatus } = useQuery({
-    queryKey: ['device-status', devices?.[0]?.id],
+  // Получение статусов всех устройств
+  const { data: devicesStatus, refetch: refetchStatuses } = useQuery({
+    queryKey: ['devices-status'],
     queryFn: async () => {
-      if (!devices || devices.length === 0) return null;
-      const res = await axios.get(`/api/devices/${devices[0].id}/status`);
+      const res = await axios.get('/api/devices/status');
       return res.data;
     },
     enabled: !!devices && devices.length > 0,
+    refetchInterval: 30000 // Обновляем каждые 30 секунд
+  });
+
+  // Проверка статуса устройства
+  const { data: deviceStatus, refetch: checkStatus } = useQuery({
+    queryKey: ['device-status', selectedDeviceId],
+    queryFn: async () => {
+      if (!selectedDeviceId) return null;
+      const res = await axios.get(`/api/devices/${selectedDeviceId}/status`);
+      return res.data;
+    },
+    enabled: !!selectedDeviceId,
     refetchInterval: false
   });
 
   // Получение поддерживаемых функций
   const { data: supportedFeatures, isLoading: featuresLoading } = useQuery({
-    queryKey: ['supported-features', devices?.[0]?.id],
+    queryKey: ['supported-features', selectedDeviceId],
     queryFn: async () => {
-      if (!devices || devices.length === 0) return null;
-      const res = await axios.get(`/api/devices/${devices[0].id}/supported-features`);
+      if (!selectedDeviceId) return null;
+      const res = await axios.get(`/api/devices/${selectedDeviceId}/supported-features`);
       return res.data;
     },
-    enabled: !!devices && devices.length > 0 && deviceStatus?.connected,
+    enabled: !!selectedDeviceId && deviceStatus?.connected,
     refetchInterval: false
   });
+
+  // Группировка устройств по локациям
+  const devicesByLocation = useMemo(() => {
+    if (!devices || devices.length === 0) return {};
+    
+    const grouped = {};
+    devices.forEach(device => {
+      const location = device.location?.trim() || 'Без локации';
+      if (!grouped[location]) {
+        grouped[location] = [];
+      }
+      grouped[location].push(device);
+    });
+    
+    // Сортируем устройства в каждой группе по приоритету и имени
+    Object.keys(grouped).forEach(location => {
+      grouped[location].sort((a, b) => {
+        if (a.priority !== b.priority) {
+          return (b.priority || 0) - (a.priority || 0);
+        }
+        return a.name.localeCompare(b.name);
+      });
+    });
+    
+    return grouped;
+  }, [devices]);
+
+  // Автоматически разворачиваем первую локацию при загрузке
+  useEffect(() => {
+    if (devices && devices.length > 0 && expandedLocations.size === 0) {
+      const firstLocation = Object.keys(devicesByLocation)[0];
+      if (firstLocation) {
+        setExpandedLocations(new Set([firstLocation]));
+        // Выбираем первое устройство
+        const firstDevice = devicesByLocation[firstLocation][0];
+        if (firstDevice) {
+          setSelectedDeviceId(firstDevice.id);
+        }
+      }
+    }
+  }, [devices, devicesByLocation, expandedLocations.size]);
+
+  // Переключение развернутости локации
+  const toggleLocation = (location) => {
+    setExpandedLocations(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(location)) {
+        newSet.delete(location);
+      } else {
+        newSet.add(location);
+      }
+      return newSet;
+    });
+  };
 
   // Перезагрузка устройства
   const [rebootConfirm, setRebootConfirm] = useState(false);
@@ -67,10 +139,22 @@ const DeviceSettingsPage = () => {
     }
   });
 
-  const handleReboot = () => {
-    if (!devices || devices.length === 0) return;
+  const handleReboot = (deviceId) => {
+    setSelectedDeviceId(deviceId);
     setRebootConfirm(true);
   };
+
+  // Переподключение к устройству
+  const reconnectMutation = useMutation({
+    mutationFn: (deviceId) => axios.post(`/api/devices/${deviceId}/reconnect`),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['devices-status']);
+      showToast.success('Переподключение выполнено успешно!');
+    },
+    onError: (error) => {
+      showToast.error('Ошибка переподключения: ' + (error.response?.data?.detail || error.message));
+    }
+  });
 
   // Создание устройства
   const createMutation = useMutation({
@@ -96,7 +180,9 @@ const DeviceSettingsPage = () => {
     mutationFn: ({ deviceId, data }) => axios.put(`/api/devices/${deviceId}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries(['devices']);
+      queryClient.invalidateQueries(['devices-status']);
       setIsEditingDevice(false);
+      setEditingDeviceId(null);
       setEditingDeviceData(null);
       showToast.success('Устройство успешно обновлено!');
     },
@@ -107,26 +193,53 @@ const DeviceSettingsPage = () => {
 
   const handleUpdateSubmit = (e) => {
     e.preventDefault();
-    const deviceId = devices[0].id;
+    if (!editingDeviceId) return;
+    
+    // Подготовка данных - исключаем пароль если он пустой
+    const updateData = {
+      name: editingDeviceData.name,
+      ip_address: editingDeviceData.ip_address,
+      username: editingDeviceData.username,
+      device_type: editingDeviceData.device_type,
+      location: editingDeviceData.location,
+      priority: editingDeviceData.priority || 0
+    };
+    
+    // Добавляем пароль только если он указан
+    if (editingDeviceData.password && editingDeviceData.password.trim() !== '') {
+      updateData.password = editingDeviceData.password;
+    }
+    
     updateMutation.mutate({ 
-      deviceId, 
-      data: {
-        name: editingDeviceData.name,
-        ip_address: editingDeviceData.ip_address,
-        username: editingDeviceData.username,
-        password: editingDeviceData.password
-      }
+      deviceId: editingDeviceId, 
+      data: updateData
     });
   };
 
-  const startEditing = () => {
+  const startEditing = (device) => {
+    setEditingDeviceId(device.id);
     setEditingDeviceData({
-      name: devices[0].name,
-      ip_address: devices[0].ip_address,
-      username: devices[0].username,
-      password: ''
+      name: device.name,
+      ip_address: device.ip_address,
+      username: device.username,
+      password: '',
+      device_type: device.device_type || 'other',
+      location: device.location || '',
+      priority: device.priority || 0
     });
     setIsEditingDevice(true);
+  };
+
+  const handleDeviceSelect = (deviceId) => {
+    setSelectedDeviceId(deviceId);
+    // Разворачиваем локацию, если она свернута
+    const device = devices?.find(d => d.id === deviceId);
+    if (device) {
+      const location = device.location?.trim() || 'Без локации';
+      if (!expandedLocations.has(location)) {
+        setExpandedLocations(prev => new Set([...prev, location]));
+      }
+    }
   };
 
   // Безопасные объекты для поддерживаемых функций
@@ -137,6 +250,9 @@ const DeviceSettingsPage = () => {
   const access = features.access_control || {};
   const videoAudio = features.video_audio || {};
   const other = features.other || {};
+
+  // Получение выбранного устройства
+  const selectedDevice = devices?.find(d => d.id === selectedDeviceId);
 
   if (isLoading) {
     return (
@@ -155,45 +271,206 @@ const DeviceSettingsPage = () => {
 
   return (
     <div role="main">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900" id="device-settings-title">
-          Настройки устройства
-        </h1>
-        <p className="mt-1 text-sm text-gray-600" id="device-settings-description">
-          Конфигурация терминала DS-K1T343EFWX для управления через ISAPI
-        </p>
+      <header className="mb-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900" id="device-settings-title">
+            Настройки терминалов
+          </h1>
+          <p className="mt-1 text-sm text-gray-600" id="device-settings-description">
+            Управление терминалами распознавания лиц, сгруппированными по локациям
+          </p>
+        </div>
+        {!isAddingDevice && !isEditingDevice && (
+          <Button onClick={() => setIsAddingDevice(true)}>
+            + Добавить терминал
+          </Button>
+        )}
       </header>
 
-      {/* Текущее устройство */}
+      {/* Группировка по локациям */}
       {devices && devices.length > 0 ? (
+        <div className="space-y-4 mb-6">
+          {Object.entries(devicesByLocation).map(([location, locationDevices]) => {
+            const isExpanded = expandedLocations.has(location);
+            const activeCount = locationDevices.filter(d => d.is_active).length;
+            
+            return (
+              <Card key={location} className="overflow-hidden">
+                <button
+                  onClick={() => toggleLocation(location)}
+                  className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors"
+                  aria-expanded={isExpanded}
+                >
+                  <div className="flex items-center gap-3">
+                    <MapPinIcon className="h-5 w-5 text-gray-500" />
+                    <div className="text-left">
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        {location}
+                      </h3>
+                      <p className="text-sm text-gray-500">
+                        {locationDevices.length} терминал{locationDevices.length !== 1 ? 'ов' : ''} 
+                        {activeCount > 0 && ` • ${activeCount} активн${activeCount !== 1 ? 'ых' : 'ый'}`}
+                      </p>
+                    </div>
+                  </div>
+                  {isExpanded ? (
+                    <ChevronUpIcon className="h-5 w-5 text-gray-400" />
+                  ) : (
+                    <ChevronDownIcon className="h-5 w-5 text-gray-400" />
+                  )}
+                </button>
+                
+                {isExpanded && (
+                  <div className="border-t bg-gray-50">
+                    <div className="p-4 space-y-3">
+                      {locationDevices.map(device => {
+                        const isSelected = selectedDeviceId === device.id;
+                        const deviceStatusInfo = devicesStatus?.find(s => s.device_id === device.id);
+                        
+                        return (
+                          <div
+                            key={device.id}
+                            className={`p-4 bg-white rounded-lg border-2 transition-all cursor-pointer ${
+                              isSelected 
+                                ? 'border-blue-500 shadow-md' 
+                                : 'border-gray-200 hover:border-gray-300'
+                            }`}
+                            onClick={() => handleDeviceSelect(device.id)}
+                          >
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <h4 className="font-semibold text-gray-900">{device.name}</h4>
+                                  <Badge variant={device.is_active ? 'success' : 'error'}>
+                                    {device.is_active ? 'Активен' : 'Неактивен'}
+                                  </Badge>
+                                  <Badge variant="info">
+                                    {device.device_type === 'entry' ? '🚪 Вход' :
+                                     device.device_type === 'exit' ? '🚶 Выход' :
+                                     device.device_type === 'both' ? '🔄 Оба' :
+                                     '📍 Другое'}
+                                  </Badge>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
+                                  <div>
+                                    <span className="font-medium">IP:</span> {device.ip_address}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium">Пользователь:</span> {device.username}
+                                  </div>
+                                  {deviceStatusInfo && (
+                                    <div className="col-span-2">
+                                      <span className="font-medium">Подписка:</span>{' '}
+                                      <Badge 
+                                        variant={deviceStatusInfo.subscription_active ? 'success' : 'warning'}
+                                        size="sm"
+                                      >
+                                        {deviceStatusInfo.subscription_active ? '✓ Активна' : '✗ Неактивна'}
+                                      </Badge>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex flex-col gap-2 ml-4">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    startEditing(device);
+                                  }}
+                                >
+                                  Редактировать
+                                </Button>
+                                {isSelected && (
+                                  <Button
+                                    variant="info"
+                                    size="sm"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      checkStatus();
+                                    }}
+                                  >
+                                    Проверить
+                                  </Button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* Детальная информация о выбранном устройстве */}
+      {selectedDevice ? (
         <Card className="mb-6">
           <div>
             <h3 className="text-lg leading-6 font-semibold text-gray-900 mb-4 tracking-tight">
-              {devices[0].name}
+              {selectedDevice.name}
             </h3>
             
             <dl className="grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2">
               <div>
                 <dt className="text-sm font-medium text-gray-500">IP адрес</dt>
-                <dd className="mt-1 text-sm text-gray-900">{devices[0].ip_address}</dd>
+                <dd className="mt-1 text-sm text-gray-900">{selectedDevice.ip_address}</dd>
               </div>
               <div>
                 <dt className="text-sm font-medium text-gray-500">Пользователь</dt>
-                <dd className="mt-1 text-sm text-gray-900">{devices[0].username}</dd>
+                <dd className="mt-1 text-sm text-gray-900">{selectedDevice.username}</dd>
               </div>
               <div>
-                <dt className="text-sm font-medium text-gray-500">Статус</dt>
+                <dt className="text-sm font-medium text-gray-500">Тип терминала</dt>
                 <dd className="mt-1">
-                  <Badge variant={devices[0].is_active ? 'success' : 'error'}>
-                    {devices[0].is_active ? 'Активно' : 'Неактивно'}
+                  <Badge variant="info">
+                    {selectedDevice.device_type === 'entry' ? '🚪 Вход' :
+                     selectedDevice.device_type === 'exit' ? '🚶 Выход' :
+                     selectedDevice.device_type === 'both' ? '🔄 Оба' :
+                     '📍 Другое'}
                   </Badge>
                 </dd>
               </div>
               <div>
+                <dt className="text-sm font-medium text-gray-500">Местоположение</dt>
+                <dd className="mt-1 text-sm text-gray-900">
+                  {selectedDevice.location || 'Не указано'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-gray-500">Статус</dt>
+                <dd className="mt-1">
+                  <Badge variant={selectedDevice.is_active ? 'success' : 'error'}>
+                    {selectedDevice.is_active ? 'Активно' : 'Неактивно'}
+                  </Badge>
+                </dd>
+              </div>
+              {devicesStatus && devicesStatus.length > 0 && (
+                <div>
+                  <dt className="text-sm font-medium text-gray-500">Подписка на события</dt>
+                  <dd className="mt-1">
+                    {(() => {
+                      const status = devicesStatus.find(s => s.device_id === selectedDevice.id);
+                      if (!status) return <Badge variant="secondary">Неизвестно</Badge>;
+                      return (
+                        <Badge variant={status.subscription_active ? 'success' : 'warning'}>
+                          {status.subscription_active ? '✓ Активна' : '✗ Неактивна'}
+                        </Badge>
+                      );
+                    })()}
+                  </dd>
+                </div>
+              )}
+              <div>
                 <dt className="text-sm font-medium text-gray-500">Последняя синхронизация</dt>
                 <dd className="mt-1 text-sm text-gray-900">
-                  {devices[0].last_sync 
-                    ? new Date(devices[0].last_sync).toLocaleString('ru-RU', {
+                  {selectedDevice.last_sync 
+                    ? new Date(selectedDevice.last_sync).toLocaleString('ru-RU', {
                         timeZone: 'Asia/Baku',
                         year: 'numeric',
                         month: '2-digit',
@@ -214,14 +491,33 @@ const DeviceSettingsPage = () => {
                   Проверить соединение
                 </Button>
                 
-                <Button variant="warning" onClick={startEditing}>
+                <Button 
+                  variant="secondary" 
+                  onClick={() => {
+                    refetchStatuses();
+                    showToast.info('Обновление статусов...');
+                  }}
+                >
+                  Обновить статусы
+                </Button>
+
+                <Button 
+                  variant="info" 
+                  onClick={() => reconnectMutation.mutate(selectedDevice.id)}
+                  disabled={reconnectMutation.isPending}
+                  loading={reconnectMutation.isPending}
+                >
+                  Переподключить
+                </Button>
+                
+                <Button variant="warning" onClick={() => startEditing(selectedDevice)}>
                   Редактировать
                 </Button>
 
                 {deviceStatus?.connected && supportedFeatures?.features?.system?.reboot && (
                   <Button
                     variant="error"
-                    onClick={handleReboot}
+                    onClick={() => handleReboot(selectedDevice.id)}
                     disabled={rebootMutation.isPending}
                     loading={rebootMutation.isPending}
                   >
@@ -483,7 +779,9 @@ const DeviceSettingsPage = () => {
         <Card className="mb-6">
           <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
             <p className="text-sm text-yellow-700">
-              Устройство не настроено. Добавьте терминал для управления пользователями.
+              {devices && devices.length === 0 
+                ? 'Устройство не настроено. Добавьте терминал для управления пользователями.'
+                : 'Выберите терминал из списка выше для просмотра детальной информации.'}
             </p>
           </div>
         </Card>
@@ -516,13 +814,37 @@ const DeviceSettingsPage = () => {
                 onChange={(e) => setEditingDeviceData({...editingDeviceData, username: e.target.value})}
               />
               <Input
-                label="Новый пароль"
+                label="Новый пароль (оставьте пустым, если не меняете)"
                 type="password"
                 autoComplete="new-password"
-                required
                 value={editingDeviceData.password}
                 onChange={(e) => setEditingDeviceData({...editingDeviceData, password: e.target.value})}
-                placeholder="Введите пароль от терминала"
+                placeholder="Оставьте пустым, чтобы сохранить текущий пароль"
+              />
+
+              {/* Новые поля */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Тип терминала
+                </label>
+                <select
+                  value={editingDeviceData.device_type}
+                  onChange={(e) => setEditingDeviceData({...editingDeviceData, device_type: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="entry">Вход</option>
+                  <option value="exit">Выход</option>
+                  <option value="both">Оба (вход и выход)</option>
+                  <option value="other">Другое</option>
+                </select>
+              </div>
+
+              <Input
+                label="Местоположение (опционально)"
+                type="text"
+                value={editingDeviceData.location}
+                onChange={(e) => setEditingDeviceData({...editingDeviceData, location: e.target.value})}
+                placeholder="Например: Главный вход, 1 этаж"
               />
             </div>
             <div className="mt-6 flex justify-end gap-2">
@@ -544,12 +866,6 @@ const DeviceSettingsPage = () => {
         </Card>
       )}
 
-      {/* Добавление нового устройства */}
-      {!isAddingDevice && (!devices || devices.length === 0) && (
-        <Button onClick={() => setIsAddingDevice(true)}>
-          Добавить устройство
-        </Button>
-      )}
 
       {isAddingDevice && (
         <Card title="Новое устройство">
@@ -586,6 +902,31 @@ const DeviceSettingsPage = () => {
                 value={newDevice.password}
                 onChange={(e) => setNewDevice({...newDevice, password: e.target.value})}
               />
+              
+              {/* Новые поля */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Тип терминала
+                </label>
+                <select
+                  value={newDevice.device_type}
+                  onChange={(e) => setNewDevice({...newDevice, device_type: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="entry">Вход</option>
+                  <option value="exit">Выход</option>
+                  <option value="both">Оба (вход и выход)</option>
+                  <option value="other">Другое</option>
+                </select>
+              </div>
+
+              <Input
+                label="Местоположение (опционально)"
+                type="text"
+                value={newDevice.location}
+                onChange={(e) => setNewDevice({...newDevice, location: e.target.value})}
+                placeholder="Например: Главный вход, 1 этаж"
+              />
             </div>
             <div className="mt-6 flex justify-end gap-2">
               <Button
@@ -607,8 +948,8 @@ const DeviceSettingsPage = () => {
         isOpen={rebootConfirm}
         onClose={() => setRebootConfirm(false)}
         onConfirm={() => {
-          if (devices && devices.length > 0) {
-            rebootMutation.mutate(devices[0].id);
+          if (selectedDeviceId) {
+            rebootMutation.mutate(selectedDeviceId);
           }
           setRebootConfirm(false);
         }}

@@ -166,7 +166,7 @@ function LoginPage() {
                 Вход в систему
               </h2>
               <p className="text-sm text-gray-600" id="login-description">
-                FaceControl - Система управления доступом
+                WTM for Mint Services - Система управления доступом
               </p>
             </div>
           </header>

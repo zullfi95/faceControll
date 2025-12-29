@@ -1,6 +1,7 @@
 from pydantic import BaseModel, RootModel, Field, field_validator, EmailStr
 from datetime import datetime
 from typing import Optional, List, Dict
+from enum import Enum
 from .enums import UserRole
 
 # --- User Schemas ---
@@ -67,10 +68,20 @@ class RolesListResponse(BaseModel):
     roles: List[RoleInfo]
 
 # --- Device Schemas ---
+class DeviceType(str, Enum):
+    """Типы терминалов."""
+    ENTRY = "entry"  # Вход
+    EXIT = "exit"    # Выход
+    BOTH = "both"    # Оба (вход и выход)
+    OTHER = "other"  # Другое
+
 class DeviceBase(BaseModel):
     name: str
     ip_address: str
     username: str
+    device_type: Optional[DeviceType] = DeviceType.OTHER
+    location: Optional[str] = None
+    priority: Optional[int] = 0
 
 class DeviceCreate(DeviceBase):
     password: str
@@ -81,10 +92,16 @@ class DeviceUpdate(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     is_active: Optional[bool] = None
+    device_type: Optional[DeviceType] = None
+    location: Optional[str] = None
+    priority: Optional[int] = None
 
 class DeviceResponse(DeviceBase):
     id: int
     is_active: bool
+    device_type: DeviceType
+    location: Optional[str] = None
+    priority: int
     created_at: datetime
     last_sync: Optional[datetime] = None
 
@@ -111,6 +128,84 @@ class FaceEnrollmentResponse(BaseModel):
     user_added: bool
     message: str
     instructions: Optional[List[str]] = None
+
+# --- Device Grouping Schemas ---
+class DeviceGroupResponse(BaseModel):
+    """Группировка устройств по типам."""
+    entry: List[DeviceResponse]
+    exit: List[DeviceResponse]
+    both: List[DeviceResponse]
+    other: List[DeviceResponse]
+
+class DeviceStatusInfo(BaseModel):
+    """Статус устройства с информацией о подключении."""
+    device_id: int
+    name: str
+    device_type: DeviceType
+    location: Optional[str] = None
+    is_active: bool
+    connection_status: str  # connected, disconnected, error
+    subscription_active: bool
+    last_event_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+# --- User Device Sync Schemas ---
+class UserDeviceSyncCreate(BaseModel):
+    """Создание связи пользователь-устройство."""
+    user_id: int
+    device_id: int
+
+class UserDeviceSyncUpdate(BaseModel):
+    """Обновление статуса синхронизации."""
+    sync_status: str
+    last_sync_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+class UserDeviceSyncResponse(BaseModel):
+    """Ответ с информацией о синхронизации."""
+    id: int
+    user_id: int
+    device_id: int
+    device_name: str
+    device_type: DeviceType
+    sync_status: str
+    last_sync_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class SyncToDevicesRequest(BaseModel):
+    """Запрос на синхронизацию пользователя с несколькими устройствами."""
+    device_ids: List[int]
+    force: bool = False  # Пересинхронизировать даже если уже синхронизирован
+
+class SyncToDevicesResult(BaseModel):
+    """Результат синхронизации с одним устройством."""
+    device_id: int
+    device_name: str
+    status: str  # synced, failed, skipped
+    message: str
+    error: Optional[str] = None
+
+class SyncToDevicesResponse(BaseModel):
+    """Ответ на запрос синхронизации с несколькими устройствами."""
+    success: bool
+    results: List[SyncToDevicesResult]
+    total_devices: int
+    synced_count: int
+    failed_count: int
+
+class UserDeviceSyncStatusResponse(BaseModel):
+    """Статус синхронизации пользователя со всеми устройствами."""
+    user_id: int
+    user_name: str
+    hikvision_id: str
+    synced_devices: List[UserDeviceSyncResponse]
+    total_synced: int
+    total_devices: int
 
 # --- Remote Enrollment Schemas ---
 class RemoteEnrollmentRequest(BaseModel):

@@ -1,0 +1,44 @@
+==========================================
+КОМАНДЫ ДЛЯ ВОССТАНОВЛЕНИЯ SSH
+==========================================
+Выполните эти команды на сервере через консоль Hetzner:
+
+1. ПРОВЕРКА SSH СЕРВИСА:
+   systemctl status sshd
+
+2. ЗАПУСК SSH (если не запущен):
+   systemctl start sshd
+   systemctl enable sshd
+
+3. ПРОВЕРКА ПОРТА 22:
+   ss -tuln | grep ":22 "
+
+4. ПРОВЕРКА FIREWALL (UFW):
+   ufw status
+
+5. РАЗРЕШИТЬ SSH В FIREWALL:
+   ufw allow 22/tcp
+   ufw reload
+
+6. ПРОВЕРКА СЕТЕВЫХ ИНТЕРФЕЙСОВ:
+   ip addr show
+
+7. ПРОВЕРКА ПУБЛИЧНОГО IP:
+   curl -4 ifconfig.me
+
+8. ПРОВЕРКА SSH КОНФИГУРАЦИИ:
+   grep -E "^Port|^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config
+
+9. ПЕРЕЗАПУСК SSH:
+   systemctl restart sshd
+
+10. ФИНАЛЬНАЯ ПРОВЕРКА:
+    systemctl status sshd
+    ss -tuln | grep ":22 "
+
+==========================================
+ВАЖНО: Проверьте также Firewall в панели Hetzner!
+Зайдите в консоль Hetzner -> Ваш сервер -> Firewall
+Убедитесь, что порт 22 (SSH) разрешен для входящих подключений.
+==========================================
+

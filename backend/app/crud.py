@@ -516,3 +516,141 @@ async def delete_user_shift_assignment(db: AsyncSession, assignment_id: int) -> 
     await db.delete(db_assignment)
     await db.commit()
     return True
+
+# --- User Device Sync Operations ---
+async def create_user_device_sync(
+    db: AsyncSession,
+    user_id: int,
+    device_id: int,
+    sync_status: str = 'pending'
+) -> models.UserDeviceSync:
+    """Создание записи синхронизации пользователя с устройством."""
+    # Проверяем, есть ли уже запись
+    result = await db.execute(
+        select(models.UserDeviceSync).filter(
+            models.UserDeviceSync.user_id == user_id,
+            models.UserDeviceSync.device_id == device_id
+        )
+    )
+    existing = result.scalars().first()
+    
+    if existing:
+        # Обновляем существующую запись
+        existing.sync_status = sync_status
+        existing.updated_at = datetime.now()
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+    
+    # Создаем новую запись
+    db_sync = models.UserDeviceSync(
+        user_id=user_id,
+        device_id=device_id,
+        sync_status=sync_status
+    )
+    db.add(db_sync)
+    await db.commit()
+    await db.refresh(db_sync)
+    return db_sync
+
+async def get_user_synced_devices(
+    db: AsyncSession,
+    user_id: int,
+    status: Optional[str] = None
+) -> List[models.UserDeviceSync]:
+    """Получение всех устройств, с которыми синхронизирован пользователь."""
+    from sqlalchemy.orm import joinedload
+    
+    query = select(models.UserDeviceSync).options(
+        joinedload(models.UserDeviceSync.device)
+    ).filter(models.UserDeviceSync.user_id == user_id)
+    
+    if status:
+        query = query.filter(models.UserDeviceSync.sync_status == status)
+    
+    result = await db.execute(query)
+    return result.unique().scalars().all()
+
+async def get_device_synced_users(
+    db: AsyncSession,
+    device_id: int,
+    status: Optional[str] = None
+) -> List[models.UserDeviceSync]:
+    """Получение всех пользователей, синхронизированных с устройством."""
+    from sqlalchemy.orm import joinedload
+    
+    query = select(models.UserDeviceSync).options(
+        joinedload(models.UserDeviceSync.user)
+    ).filter(models.UserDeviceSync.device_id == device_id)
+    
+    if status:
+        query = query.filter(models.UserDeviceSync.sync_status == status)
+    
+    result = await db.execute(query)
+    return result.unique().scalars().all()
+
+async def update_device_sync_status(
+    db: AsyncSession,
+    user_id: int,
+    device_id: int,
+    sync_status: str,
+    error_message: Optional[str] = None
+) -> Optional[models.UserDeviceSync]:
+    """Обновление статуса синхронизации."""
+    result = await db.execute(
+        select(models.UserDeviceSync).filter(
+            models.UserDeviceSync.user_id == user_id,
+            models.UserDeviceSync.device_id == device_id
+        )
+    )
+    db_sync = result.scalars().first()
+    
+    if not db_sync:
+        return None
+    
+    db_sync.sync_status = sync_status
+    db_sync.error_message = error_message
+    
+    if sync_status == 'synced':
+        db_sync.last_sync_at = datetime.now()
+    
+    db_sync.updated_at = datetime.now()
+    
+    await db.commit()
+    await db.refresh(db_sync)
+    return db_sync
+
+async def get_devices_by_type(
+    db: AsyncSession,
+    device_type: str,
+    active_only: bool = True
+) -> List[models.Device]:
+    """Получение устройств по типу."""
+    query = select(models.Device).filter(models.Device.device_type == device_type)
+    
+    if active_only:
+        query = query.filter(models.Device.is_active == True)
+    
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def delete_user_device_sync(
+    db: AsyncSession,
+    user_id: int,
+    device_id: int
+) -> bool:
+    """Удаление записи синхронизации."""
+    result = await db.execute(
+        select(models.UserDeviceSync).filter(
+            models.UserDeviceSync.user_id == user_id,
+            models.UserDeviceSync.device_id == device_id
+        )
+    )
+    db_sync = result.scalars().first()
+    
+    if not db_sync:
+        return False
+    
+    await db.delete(db_sync)
+    await db.commit()
+    return True

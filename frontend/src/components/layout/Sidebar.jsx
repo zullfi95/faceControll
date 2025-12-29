@@ -16,7 +16,7 @@ const Sidebar = () => {
   const { isOperationsManager } = useAuth();
   const menuRefs = useRef([]);
 
-  const isActive = (path) => {
+  const isActive = (path) => { 
     if (path === '/') {
       return location.pathname === '/';
     }
@@ -108,10 +108,11 @@ const Sidebar = () => {
           <div className="flex items-center flex-shrink-0 px-4 mb-8">
             <Link
               to="/users"
-              className="text-2xl font-bold text-[rgb(19,91,147)] hover:text-[rgb(30,120,180)] transition-colors"
-              aria-label="FaceControl - Главная"
+              className="flex flex-col text-2xl font-bold text-[rgb(19,91,147)] hover:text-[rgb(30,120,180)] transition-colors leading-tight"
+              aria-label="WTM for Mint Services - Главная"
             >
-              FaceControl
+              <span>WTM</span>
+              <span className="text-sm font-normal">for Mint Services</span>
             </Link>
           </div>
 

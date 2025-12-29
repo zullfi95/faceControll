@@ -127,9 +127,10 @@ const MobileMenu = () => {
                   <Link
                     to="/users"
                     onClick={() => setIsOpen(false)}
-                    className="text-xl font-bold text-[rgb(19,91,147)] hover:text-[rgb(30,120,180)] transition-colors"
+                    className="flex flex-col text-xl font-bold text-[rgb(19,91,147)] hover:text-[rgb(30,120,180)] transition-colors leading-tight"
                   >
-                    FaceControl
+                    <span>WTM</span>
+                    <span className="text-xs font-normal">for Mint Services</span>
                   </Link>
                   <button
                     onClick={() => setIsOpen(false)}

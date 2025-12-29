@@ -27,9 +27,6 @@ class Settings(BaseSettings):
     # Webhook
     webhook_api_key: str = ""
 
-    # Hikvision
-    terminal_in_ip: str = "10.0.0.100"
-
     # Server
     http_port: int = 8000  # Backend работает на порту 8000
     server_ip: str = "46.62.223.55"

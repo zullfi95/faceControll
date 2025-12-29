@@ -93,8 +93,23 @@ else
 fi
 echo ""
 
+# Проверка SSH сервиса
+echo "7. SSH сервис:"
+if systemctl is-active --quiet sshd || systemctl is-active --quiet ssh; then
+    echo "   ✓ SSH сервис запущен"
+    if ss -tuln | grep -q ":22 "; then
+        echo "   ✓ Порт 22 слушается"
+    else
+        echo "   ✗ Порт 22 НЕ слушается!"
+    fi
+else
+    echo "   ✗ SSH сервис НЕ запущен!"
+    echo "   Запустите: systemctl start sshd && systemctl enable sshd"
+fi
+echo ""
+
 # Проверка портов
-echo "7. Открытые порты:"
+echo "8. Открытые порты:"
 if command -v netstat &> /dev/null; then
     netstat -tuln | grep LISTEN | awk '{print "   " $4}' | sort -u
 elif command -v ss &> /dev/null; then
@@ -105,17 +120,23 @@ fi
 echo ""
 
 # Проверка firewall
-echo "8. Firewall (UFW):"
+echo "9. Firewall (UFW):"
 if command -v ufw &> /dev/null; then
     echo "   ✓ Установлен"
     echo "   Статус: $(ufw status | head -1)"
+    if ufw status | grep -q "22/tcp"; then
+        echo "   ✓ Порт 22 разрешен в UFW"
+    else
+        echo "   ⚠ Порт 22 может быть не разрешен в UFW"
+        echo "   Разрешите: ufw allow 22/tcp"
+    fi
 else
     echo "   ✗ Не установлен"
 fi
 echo ""
 
 # Проверка Docker контейнеров
-echo "9. Docker контейнеры:"
+echo "10. Docker контейнеры:"
 if command -v docker &> /dev/null; then
     if [ -d "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
         cd $PROJECT_DIR 2>/dev/null && docker-compose ps 2>/dev/null || echo "   Контейнеры не запущены"
@@ -128,12 +149,12 @@ fi
 echo ""
 
 # Проверка дискового пространства
-echo "10. Дисковое пространство:"
+echo "11. Дисковое пространство:"
 df -h / | tail -1 | awk '{print "   Использовано: " $3 " / " $2 " (" $5 ")"}'
 echo ""
 
 # Проверка памяти
-echo "11. Память:"
+echo "12. Память:"
 free -h | grep Mem | awk '{print "   Использовано: " $3 " / " $2 " (" int($3/$2*100) "%)"}'
 if [ -f /swapfile ]; then
     echo "   Swap файл: существует"
@@ -144,7 +165,7 @@ fi
 echo ""
 
 # Проверка переменных окружения
-echo "12. Переменные окружения:"
+echo "13. Переменные окружения:"
 if [ -f "$PROJECT_DIR/.env" ]; then
     echo "   .env файл найден"
     echo "   Ключевые переменные:"
@@ -157,6 +178,11 @@ echo ""
 echo "=========================================="
 echo "Проверка завершена"
 echo "=========================================="
+
+
+
+
+
 
 
 

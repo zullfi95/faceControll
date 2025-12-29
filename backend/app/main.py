@@ -20,6 +20,7 @@ from .utils.websocket_manager import websocket_manager
 from .hikvision_client import HikvisionClient
 from . import event_service
 from .webhook_handler import parse_multipart_event, parse_json_event
+from .tasks.auto_close_sessions import auto_close_sessions_daily as imported_auto_close_sessions_daily
 from .auth import (
     verify_password, create_access_token, get_current_active_user,
     require_operations_manager, get_current_user
@@ -128,6 +129,7 @@ async def get_uploaded_file(filename: str):
 telegram_bot = None
 daily_report_service = None
 daily_report_task = None  # Фоновая задача для ежедневных отчетов
+auto_close_sessions_task = None  # Фоновая задача для автозакрытия старых сессий
 
 async def send_daily_reports_automatically():
     """
@@ -172,13 +174,13 @@ async def send_daily_reports_automatically():
 
 @app.on_event("startup")
 async def startup():
-    """Инициализация базы данных и телеграм бота при запуске приложения."""
+    """Инициализация базы данных, телеграм бота и Device Manager при запуске приложения."""
     # Инициализация базы данных
     async with database.engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
 
     # Инициализация телеграм бота
-    global telegram_bot, daily_report_service, daily_report_task
+    global telegram_bot, daily_report_service, daily_report_task, auto_close_sessions_task
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -191,6 +193,50 @@ async def startup():
         logger.info("Telegram bot and automated daily reports initialized successfully")
     else:
         logger.warning("Telegram bot not configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)")
+    
+    # Запускаем автоматическое закрытие старых сессий (передаем telegram_bot для уведомлений)
+    try:
+        auto_close_sessions_task = asyncio.create_task(imported_auto_close_sessions_daily(telegram_bot))
+        logger.info("Auto-close sessions task initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize auto-close sessions task: {e}", exc_info=True)
+    
+    # Инициализация Device Manager и запуск подписок на события
+    try:
+        from .device_manager import device_manager
+        
+        logger.info("Initializing Device Manager...")
+        
+        # Получаем сессию БД для инициализации
+        async for db in database.get_db_session():
+            # Инициализируем Device Manager
+            await device_manager.initialize(db)
+            
+            # Получаем все активные устройства
+            active_devices = await crud.get_all_devices(db)
+            active_devices = [d for d in active_devices if d.is_active]
+            
+            logger.info(f"Found {len(active_devices)} active device(s)")
+            
+            # Запускаем подписки на события для каждого активного терминала
+            subscribed_count = 0
+            for device in active_devices:
+                try:
+                    success = await device_manager.start_subscription(device.id)
+                    if success:
+                        logger.info(f"✓ Started event subscription for device {device.id} ({device.name})")
+                        subscribed_count += 1
+                    else:
+                        logger.warning(f"✗ Failed to start subscription for device {device.id} ({device.name})")
+                except Exception as e:
+                    logger.error(f"✗ Error starting subscription for device {device.id}: {e}", exc_info=True)
+            
+            logger.info(f"Device Manager initialized: {subscribed_count}/{len(active_devices)} subscriptions active")
+            break  # Выходим после первой итерации
+            
+    except Exception as e:
+        logger.error(f"Error initializing Device Manager: {e}", exc_info=True)
+        logger.warning("Application will continue without Device Manager")
 
 @app.post("/users/", response_model=schemas.UserResponse)
 async def create_user(user: schemas.UserCreate, db: AsyncSession = Depends(database.get_db)):
@@ -854,6 +900,238 @@ async def sync_user_to_device(user_id: int, db: AsyncSession = Depends(database.
         logger.error(f"Error during sync: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error during sync: {str(e)}")
 
+@app.post("/users/{user_id}/sync-to-devices", response_model=schemas.SyncToDevicesResponse)
+async def sync_user_to_multiple_devices(
+    user_id: int,
+    sync_request: schemas.SyncToDevicesRequest,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Синхронизация пользователя с несколькими устройствами.
+    
+    Args:
+        user_id: ID пользователя
+        sync_request: Список device_ids и опция force
+    
+    Returns:
+        Результаты синхронизации для каждого устройства
+    """
+    try:
+        from .device_manager import device_manager
+        
+        # Получаем пользователя
+        user = await crud.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        results = []
+        synced_count = 0
+        failed_count = 0
+        
+        # Синхронизируем на каждое устройство
+        for device_id in sync_request.device_ids:
+            try:
+                device = await crud.get_device_by_id(db, device_id)
+                if not device:
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name="Unknown",
+                        status="failed",
+                        message="Device not found",
+                        error="Device not found"
+                    ))
+                    failed_count += 1
+                    continue
+                
+                if not device.is_active:
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name=device.name,
+                        status="failed",
+                        message="Device is inactive",
+                        error="Device is inactive"
+                    ))
+                    failed_count += 1
+                    continue
+                
+                # Проверяем, нужна ли синхронизация
+                if not sync_request.force:
+                    synced_devices = await crud.get_user_synced_devices(db, user_id, status='synced')
+                    if any(s.device_id == device_id for s in synced_devices):
+                        results.append(schemas.SyncToDevicesResult(
+                            device_id=device_id,
+                            device_name=device.name,
+                            status="skipped",
+                            message="Already synced (use force=true to resync)"
+                        ))
+                        continue
+                
+                # Создаем/обновляем запись синхронизации
+                await crud.create_user_device_sync(db, user_id, device_id, 'syncing')
+                
+                # Получаем клиент от Device Manager
+                client = await device_manager.get_client(device_id, db)
+                if not client:
+                    await crud.update_device_sync_status(
+                        db, user_id, device_id, 'failed',
+                        "Failed to create client"
+                    )
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name=device.name,
+                        status="failed",
+                        message="Failed to create client",
+                        error="Could not connect to device"
+                    ))
+                    failed_count += 1
+                    continue
+                
+                # Проверяем соединение
+                connected, error = await client.check_connection()
+                if not connected:
+                    await crud.update_device_sync_status(
+                        db, user_id, device_id, 'failed',
+                        f"Connection failed: {error}"
+                    )
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name=device.name,
+                        status="failed",
+                        message=f"Connection failed",
+                        error=error
+                    ))
+                    failed_count += 1
+                    continue
+                
+                # Создаем пользователя на терминале
+                result = await client.create_user_basic(
+                    employee_no=user.hikvision_id,
+                    name=user.full_name,
+                    group_id=None
+                )
+                
+                if result.get("success"):
+                    # Привязываем фото (если есть)
+                    face_url = f"{client.base_url}/LOCALS/pic/web_face_enrollpic.jpg@WEB000000000020"
+                    face_result = await client.setup_user_face_fdlib(
+                        employee_no=user.hikvision_id,
+                        face_url=face_url
+                    )
+                    
+                    # Обновляем статус синхронизации
+                    await crud.update_device_sync_status(db, user_id, device_id, 'synced')
+                    
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name=device.name,
+                        status="synced",
+                        message="Successfully synced"
+                    ))
+                    synced_count += 1
+                else:
+                    await crud.update_device_sync_status(
+                        db, user_id, device_id, 'failed',
+                        result.get('error', 'Unknown error')
+                    )
+                    results.append(schemas.SyncToDevicesResult(
+                        device_id=device_id,
+                        device_name=device.name,
+                        status="failed",
+                        message="Failed to create user on terminal",
+                        error=result.get('error')
+                    ))
+                    failed_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error syncing user {user_id} to device {device_id}: {e}", exc_info=True)
+                await crud.update_device_sync_status(
+                    db, user_id, device_id, 'failed',
+                    str(e)
+                )
+                results.append(schemas.SyncToDevicesResult(
+                    device_id=device_id,
+                    device_name=device.name if device else "Unknown",
+                    status="failed",
+                    message="Error during sync",
+                    error=str(e)
+                ))
+                failed_count += 1
+        
+        # Обновляем User.synced_to_device (для обратной совместимости)
+        if synced_count > 0:
+            await crud.mark_user_synced(db, user_id, True)
+        
+        return schemas.SyncToDevicesResponse(
+            success=failed_count == 0,
+            results=results,
+            total_devices=len(sync_request.device_ids),
+            synced_count=synced_count,
+            failed_count=failed_count
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in sync_user_to_multiple_devices: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/users/{user_id}/device-sync-status", response_model=schemas.UserDeviceSyncStatusResponse)
+async def get_user_device_sync_status(
+    user_id: int,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Получение статуса синхронизации пользователя со всеми устройствами.
+    
+    Returns:
+        Информация о том, на какие устройства синхронизирован пользователь
+    """
+    try:
+        # Получаем пользователя
+        user = await crud.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Получаем все синхронизации пользователя
+        user_syncs = await crud.get_user_synced_devices(db, user_id)
+        
+        # Получаем все устройства для подсчета total
+        all_devices = await crud.get_all_devices(db)
+        
+        # Формируем ответ
+        synced_devices = []
+        for sync in user_syncs:
+            synced_devices.append(schemas.UserDeviceSyncResponse(
+                id=sync.id,
+                user_id=sync.user_id,
+                device_id=sync.device_id,
+                device_name=sync.device.name,
+                device_type=sync.device.device_type,
+                sync_status=sync.sync_status,
+                last_sync_at=sync.last_sync_at,
+                error_message=sync.error_message,
+                created_at=sync.created_at,
+                updated_at=sync.updated_at
+            ))
+        
+        # Подсчитываем количество синхронизированных устройств
+        synced_count = sum(1 for s in user_syncs if s.sync_status == 'synced')
+        
+        return schemas.UserDeviceSyncStatusResponse(
+            user_id=user_id,
+            user_name=user.full_name,
+            hikvision_id=user.hikvision_id,
+            synced_devices=synced_devices,
+            total_synced=synced_count,
+            total_devices=len(all_devices)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user device sync status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 @app.post("/devices/{device_id}/start-face-capture")
 async def capture_face_from_terminal(device_id: int, db: AsyncSession = Depends(database.get_db)):
     """
@@ -1063,6 +1341,92 @@ async def check_device_status(device_id: int, db: AsyncSession = Depends(databas
             device_info=None,
             error=str(e)
         )
+
+@app.get("/devices/groups", response_model=schemas.DeviceGroupResponse)
+async def get_device_groups(db: AsyncSession = Depends(database.get_db)):
+    """Получение устройств, сгруппированных по типам (entry/exit/both/other)."""
+    try:
+        devices = await crud.get_all_devices(db)
+        
+        # Группируем устройства по типам
+        groups = {
+            "entry": [],
+            "exit": [],
+            "both": [],
+            "other": []
+        }
+        
+        for device in devices:
+            device_type = device.device_type or "other"
+            if device_type in groups:
+                groups[device_type].append(device)
+        
+        return schemas.DeviceGroupResponse(**groups)
+    except Exception as e:
+        logger.error(f"Error getting device groups: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/devices/status", response_model=List[schemas.DeviceStatusInfo])
+async def get_all_devices_status(db: AsyncSession = Depends(database.get_db)):
+    """Получение статуса всех устройств с информацией о подключении и подписках."""
+    try:
+        from .device_manager import device_manager
+        
+        if not device_manager.is_initialized():
+            logger.warning("Device Manager not initialized")
+            return []
+        
+        statuses = await device_manager.get_all_statuses()
+        
+        # Преобразуем в формат DeviceStatusInfo
+        result = []
+        for status in statuses:
+            result.append(schemas.DeviceStatusInfo(
+                device_id=status["device_id"],
+                name=status["name"],
+                device_type=status["device_type"],
+                location=status.get("location"),
+                is_active=status["is_active"],
+                connection_status=status["connection_status"],
+                subscription_active=status["subscription_active"],
+                last_event_at=status.get("last_event_at"),
+                error_message=status.get("error_message")
+            ))
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error getting devices status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.post("/devices/{device_id}/reconnect")
+async def reconnect_device(device_id: int, db: AsyncSession = Depends(database.get_db)):
+    """Переподключение к устройству (перезапуск подписки на события)."""
+    try:
+        from .device_manager import device_manager
+        
+        device = await crud.get_device_by_id(db, device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        
+        success = await device_manager.reconnect_device(device_id, db)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Successfully reconnected to device {device_id}",
+                "device_id": device_id,
+                "device_name": device.name
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to reconnect to device {device_id}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reconnecting device: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/devices/{device_id}/supported-features")
 async def get_supported_features(
@@ -2731,11 +3095,30 @@ async def receive_webhook_event(
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    await event_service.stop_all_subscriptions()
-    global daily_report_task
+    """Завершение работы приложения и остановка всех фоновых задач."""
+    # Останавливаем Device Manager (автоматически останавливает все подписки)
+    try:
+        from .device_manager import device_manager
+        await device_manager.stop_all()
+        logger.info("Device Manager stopped successfully")
+    except Exception as e:
+        logger.error(f"Error stopping Device Manager: {e}")
+    
+    # Останавливаем автоматическую отправку отчетов
+    global daily_report_task, auto_close_sessions_task
     if daily_report_task and not daily_report_task.done():
         daily_report_task.cancel()
         try:
             await daily_report_task
         except asyncio.CancelledError:
             pass
+        logger.info("Daily report task stopped")
+    
+    # Останавливаем автоматическое закрытие сессий
+    if auto_close_sessions_task and not auto_close_sessions_task.done():
+        auto_close_sessions_task.cancel()
+        try:
+            await auto_close_sessions_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Auto-close sessions task stopped")

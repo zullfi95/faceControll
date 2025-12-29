@@ -14,8 +14,17 @@ class Device(Base):
     username = Column(String(100), nullable=False)
     password_encrypted = Column(Text, nullable=False)  # Зашифрованный пароль
     is_active = Column(Boolean, default=True)
+    
+    # Новые поля для группировки и управления терминалами
+    device_type = Column(String(20), default='other')  # entry, exit, both, other
+    location = Column(String(200), nullable=True)  # Местоположение терминала
+    priority = Column(Integer, default=0)  # Приоритет синхронизации
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_sync = Column(DateTime(timezone=True), nullable=True)
+    
+    # Связи
+    user_syncs = relationship("UserDeviceSync", back_populates="device", cascade="all, delete-orphan")
 
 class User(Base):
     __tablename__ = "users"
@@ -32,6 +41,7 @@ class User(Base):
 
     events = relationship("AttendanceEvent", back_populates="user")
     shift_assignments = relationship("UserShiftAssignment", back_populates="user", cascade="all, delete-orphan")
+    device_syncs = relationship("UserDeviceSync", back_populates="user", cascade="all, delete-orphan")
 
 class AttendanceEvent(Base):
     __tablename__ = "attendance_events"
@@ -54,6 +64,27 @@ class AttendanceEvent(Base):
 
     # Связь с пользователем (lazy loading для оптимизации)
     user = relationship("User", back_populates="events", lazy="joined")
+
+
+class UserDeviceSync(Base):
+    """Модель связи пользователя с устройством (многие-ко-многим)."""
+    __tablename__ = "user_device_sync"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Статус синхронизации: pending, syncing, synced, failed
+    sync_status = Column(String(20), default='pending', index=True)
+    last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Связи
+    user = relationship("User", back_populates="device_syncs")
+    device = relationship("Device", back_populates="user_syncs")
 
 
 class WorkShift(Base):

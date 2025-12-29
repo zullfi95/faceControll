@@ -92,8 +92,9 @@ cd wireguard
 bash generate-keys.sh
 
 # Применение конфигурации на сервере
-scp wg0-server.conf root@46.62.223.55:/etc/wireguard/wg0.conf
-ssh root@46.62.223.55 'systemctl enable wg-quick@wg0 && systemctl start wg-quick@wg0'
+# Скопируйте wg0-server.conf на сервер в /etc/wireguard/wg0.conf
+# Затем на сервере выполните:
+# systemctl enable wg-quick@wg0 && systemctl start wg-quick@wg0
 
 # Импорт wg0-client.conf в Keenetic Router
 ```
@@ -266,6 +267,38 @@ face-access-control/
 2. Проверьте правильность ключей в конфигурации
 3. Проверьте, что порт 51820 открыт на сервере
 4. Проверьте конфигурацию на Keenetic
+
+### SSH подключение не работает
+
+Если вы не можете подключиться по SSH с локальной машины, но можете через консоль Hetzner:
+
+**На Windows (локально):**
+1. Выполните диагностику: `.\scripts\diagnose-ssh-local.ps1`
+2. Это проверит доступность сервера и порта 22
+
+**На сервере (через консоль Hetzner):**
+
+Если скрипт недоступен, выполните команды напрямую:
+
+```bash
+# Запустить SSH
+systemctl start sshd
+systemctl enable sshd
+
+# Разрешить SSH в firewall
+ufw allow 22/tcp
+ufw reload
+
+# Проверить статус
+systemctl status sshd
+ss -tuln | grep ":22 "
+```
+
+Или если скрипт доступен:
+1. Выполните диагностику: `bash scripts/diagnose-ssh.sh`
+2. Проверьте firewall в панели Hetzner (порт 22 должен быть открыт)
+
+Подробная инструкция: [docs/SSH_TROUBLESHOOTING.md](docs/SSH_TROUBLESHOOTING.md)
 
 ## Лицензия
 

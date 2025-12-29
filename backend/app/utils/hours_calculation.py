@@ -23,6 +23,9 @@ DEFAULT_END_OF_WORKDAY = time(18, 0)  # 18:00 - конец рабочего дн
 WORKDAY_START = time.min  # 00:00
 WORKDAY_END = time.max    # 23:59:59
 
+# Толерантность для автоматического закрытия смены (в минутах)
+SHIFT_END_TOLERANCE_MINUTES = 10  # ±10 минут от конца смены
+
 # Часовой пояс Baku (UTC+4) для согласованности с фронтендом
 BAKU_TZ = timezone(timedelta(hours=4))
 
@@ -200,6 +203,20 @@ def split_session_by_shift(session_start: datetime, session_end: datetime,
             # Если смена некорректна, считаем всю сессию вне смены
             session_duration = session_end - session_start
             return (0.0, session_duration.total_seconds() / 3600)
+
+        # Применяем толерантность ±10 минут для выхода
+        # Если выход в пределах ±10 минут от конца смены, считаем как выход точно в конец смены
+        tolerance = timedelta(minutes=SHIFT_END_TOLERANCE_MINUTES)
+        time_diff_from_shift_end = abs((session_end - shift_end).total_seconds())
+        
+        if time_diff_from_shift_end <= tolerance.total_seconds():
+            # Выход в пределах толерантности - корректируем время выхода
+            logger.info(
+                f"split_session_by_shift: Exit within tolerance. "
+                f"Session_end={session_end}, Shift_end={shift_end}, "
+                f"Diff={time_diff_from_shift_end/60:.1f} min. Adjusting to shift_end."
+            )
+            session_end = shift_end
 
         # Находим пересечение сессии и смены
         overlap_start = max(session_start, shift_start)

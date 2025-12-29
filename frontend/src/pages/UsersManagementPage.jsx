@@ -1,18 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
-import Input from '../components/ui/Input';
-import Badge from '../components/ui/Badge';
 import Card from '../components/ui/Card';
-import Skeleton from '../components/ui/Skeleton';
 import showToast from '../utils/toast';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 function UsersManagementPage() {
   const { isOperationsManager } = useAuth();
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('terminal'); // 'terminal' или 'system'
   
   // Данные для пользователей терминала
@@ -56,6 +54,13 @@ function UsersManagementPage() {
     is_active: true,
   });
 
+  // Состояния для выбора пользователей терминала
+  const [selectedUserIds, setSelectedUserIds] = useState(new Set());
+
+  // Состояния для массовых операций
+  const [showBulkRoleModal, setShowBulkRoleModal] = useState(false);
+  const [showBulkShiftModal, setShowBulkShiftModal] = useState(false);
+
   // Загрузка списка смен
   const { data: workShifts = [], isLoading: isLoadingShifts } = useQuery({
     queryKey: ['work-shifts'],
@@ -72,7 +77,7 @@ function UsersManagementPage() {
       fetchSystemUsers();
       fetchRoles();
     }
-  }, [isOperationsManager]);
+  }, [isOperationsManager]); // isOperationsManager стабильная функция из контекста
 
   const fetchTerminalUsers = async () => {
     try {
@@ -107,26 +112,156 @@ function UsersManagementPage() {
     }
   };
 
-  // Обработчики для пользователей терминала
-  const handleTerminalSubmit = async (e) => {
-    e.preventDefault();
-    setTerminalError('');
+  // Функции управления выбором пользователей терминала
+  const handleSelectUser = (userId) => {
+    const newSelected = new Set(selectedUserIds);
+    if (newSelected.has(userId)) {
+      newSelected.delete(userId);
+    } else {
+      newSelected.add(userId);
+    }
+    setSelectedUserIds(newSelected);
+  };
 
-    try {
-      await axios.put(`/api/users/${editingTerminalUser.id}`, {
-        role: terminalFormData.role,
-      });
-      
+  const handleSelectAll = () => {
+    const allUserIds = new Set(filteredTerminalUsers.map(user => user.id));
+    setSelectedUserIds(allUserIds);
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedUserIds(new Set());
+  };
+
+  // Мутации для операций с пользователями терминала
+  const updateTerminalUserRoleMutation = useMutation({
+    mutationFn: async ({ userId, role }) => {
+      return axios.put(`/api/users/${userId}`, { role });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['terminal-users'] });
       setShowTerminalModal(false);
       setEditingTerminalUser(null);
       resetTerminalForm();
       showToast.success('Роль пользователя успешно обновлена');
-      fetchTerminalUsers();
-    } catch (error) {
+    },
+    onError: (error) => {
       const errorMsg = error.response?.data?.detail || 'Ошибка сохранения';
       showToast.error(errorMsg);
       setTerminalError(errorMsg);
     }
+  });
+
+  const bulkUpdateRoleMutation = useMutation({
+    mutationFn: async ({ userIds, role }) => {
+      const results = await Promise.allSettled(
+        userIds.map(userId => axios.put(`/api/users/${userId}`, { role }))
+      );
+      return results;
+    },
+    onSuccess: (results) => {
+      const fulfilled = results.filter(result => result.status === 'fulfilled').length;
+      const rejected = results.filter(result => result.status === 'rejected').length;
+
+      queryClient.invalidateQueries({ queryKey: ['terminal-users'] });
+
+      if (rejected === 0) {
+        showToast.success(`Роль успешно изменена для всех ${fulfilled} пользователей`);
+      } else {
+        showToast.warning(`Роль изменена для ${fulfilled} пользователей. Ошибок: ${rejected}`);
+      }
+
+      setShowBulkRoleModal(false);
+      setSelectedUserIds(new Set());
+    },
+    onError: (error) => {
+      showToast.error('Произошла ошибка при выполнении массовой операции');
+    }
+  });
+
+  const bulkAssignToShiftMutation = useMutation({
+    mutationFn: async ({ userIds, shiftId, startDate, endDate }) => {
+      const results = await Promise.allSettled(
+        userIds.map(userId =>
+          axios.post('/api/user-shift-assignments/', {
+            user_id: userId,
+            shift_id: parseInt(shiftId),
+            start_date: startDate || null,
+            end_date: endDate || null,
+            is_active: true,
+          })
+        )
+      );
+      return results;
+    },
+    onSuccess: (results) => {
+      const fulfilled = results.filter(result => result.status === 'fulfilled').length;
+      const rejected = results.filter(result => result.status === 'rejected').length;
+
+      queryClient.invalidateQueries({ queryKey: ['terminal-users'] });
+
+      if (rejected === 0) {
+        showToast.success(`Пользователи успешно привязаны к смене (${fulfilled})`);
+      } else {
+        showToast.warning(`Привязано к смене: ${fulfilled}. Ошибок: ${rejected}`);
+      }
+
+      setShowBulkShiftModal(false);
+      setSelectedUserIds(new Set());
+      setSelectedShiftId('');
+      setShiftStartDate('');
+      setShiftEndDate('');
+    },
+    onError: (error) => {
+      showToast.error('Произошла ошибка при привязке к смене');
+    }
+  });
+
+  // Мутации для системных пользователей
+  const updateSystemUserMutation = useMutation({
+    mutationFn: async ({ userId, data }) => {
+      const updateData = { ...data };
+      if (!updateData.password) {
+        delete updateData.password;
+      }
+      return axios.put(`/api/system-users/${userId}`, updateData);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['system-users'] });
+      setShowSystemModal(false);
+      setEditingSystemUser(null);
+      resetSystemForm();
+      showToast.success('Пользователь успешно обновлен');
+    },
+    onError: (error) => {
+      const errorMsg = error.response?.data?.detail || 'Ошибка сохранения';
+      showToast.error(errorMsg);
+      setSystemError(errorMsg);
+    }
+  });
+
+  const deleteSystemUserMutation = useMutation({
+    mutationFn: (userId) => axios.delete(`/api/system-users/${userId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['system-users'] });
+      showToast.success('Пользователь успешно удален');
+      setSystemDeleteConfirm(null);
+    },
+    onError: (error) => {
+      const errorMsg = error.response?.data?.detail || 'Ошибка удаления';
+      showToast.error(errorMsg);
+      setSystemError(errorMsg);
+    }
+  });
+
+  // Обработчики для пользователей терминала
+  const handleTerminalSubmit = (e) => {
+    e.preventDefault();
+    setTerminalError('');
+
+    updateTerminalUserRoleMutation.mutate({
+      userId: editingTerminalUser.id,
+      role: terminalFormData.role
+    });
   };
 
   const handleTerminalEdit = (user) => {
@@ -145,30 +280,14 @@ function UsersManagementPage() {
   };
 
   // Обработчики для системных пользователей
-  const handleSystemSubmit = async (e) => {
+  const handleSystemSubmit = (e) => {
     e.preventDefault();
     setSystemError('');
 
-    try {
-      if (editingSystemUser) {
-        // Обновление
-        const updateData = { ...systemFormData };
-        if (!updateData.password) {
-          delete updateData.password;
-        }
-        await axios.put(`/api/system-users/${editingSystemUser.id}`, updateData);
-      }
-      
-      setShowSystemModal(false);
-      setEditingSystemUser(null);
-      resetSystemForm();
-      showToast.success(editingSystemUser ? 'Пользователь успешно обновлен' : 'Пользователь успешно создан');
-      fetchSystemUsers();
-    } catch (error) {
-      const errorMsg = error.response?.data?.detail || 'Ошибка сохранения';
-      showToast.error(errorMsg);
-      setSystemError(errorMsg);
-    }
+    updateSystemUserMutation.mutate({
+      userId: editingSystemUser.id,
+      data: systemFormData
+    });
   };
 
   const [systemDeleteConfirm, setSystemDeleteConfirm] = useState(null);
@@ -177,18 +296,10 @@ function UsersManagementPage() {
     setSystemDeleteConfirm(userId);
   };
 
-  const confirmSystemDelete = async () => {
+  const confirmSystemDelete = () => {
     if (!systemDeleteConfirm) return;
-    
-    try {
-      await axios.delete(`/api/system-users/${systemDeleteConfirm}`);
-      showToast.success('Пользователь успешно удален');
-      fetchSystemUsers();
-      setSystemDeleteConfirm(null);
-    } catch (error) {
-      showToast.error(error.response?.data?.detail || 'Ошибка удаления');
-      setSystemError(error.response?.data?.detail || 'Ошибка удаления');
-    }
+
+    deleteSystemUserMutation.mutate(systemDeleteConfirm);
   };
 
   const handleSystemEdit = (user) => {
@@ -245,41 +356,30 @@ function UsersManagementPage() {
     setShowShiftAssignmentModal(true);
   };
 
-  const handleShiftAssignmentSubmit = async (e) => {
+  const handleShiftAssignmentSubmit = (e) => {
     e.preventDefault();
     if (!selectedShiftId || !selectedUserForShift) {
       showToast.error('Выберите смену');
       return;
     }
 
-    try {
-      await axios.post('/api/user-shift-assignments/', {
-        user_id: selectedUserForShift.id,
-        shift_id: parseInt(selectedShiftId),
-        start_date: shiftStartDate || null,
-        end_date: shiftEndDate || null,
-        is_active: true,
-      });
-      
-      showToast.success('Пользователь успешно привязан к смене');
-      setShowShiftAssignmentModal(false);
-      setSelectedUserForShift(null);
-      setSelectedShiftId('');
-      setShiftStartDate('');
-      setShiftEndDate('');
-    } catch (error) {
-      showToast.error(error.response?.data?.detail || 'Ошибка привязки к смене');
-    }
+    // Используем bulkAssignToShiftMutation для одиночной операции
+    bulkAssignToShiftMutation.mutate({
+      userIds: [selectedUserForShift.id],
+      shiftId: selectedShiftId,
+      startDate: shiftStartDate,
+      endDate: shiftEndDate
+    });
   };
 
-  const filteredTerminalUsers = terminalUsers.filter((user) => {
+  const filteredTerminalUsers = useMemo(() => {
     const searchLower = searchTerm.toLowerCase();
-    return (
+    return terminalUsers.filter((user) =>
       user.full_name?.toLowerCase().includes(searchLower) ||
       user.hikvision_id?.toLowerCase().includes(searchLower) ||
       user.department?.toLowerCase().includes(searchLower)
     );
-  });
+  }, [terminalUsers, searchTerm]);
 
   if (!isOperationsManager()) {
     return (
@@ -300,7 +400,10 @@ function UsersManagementPage() {
         <div className="border-b border-gray-200">
           <nav className="-mb-px flex space-x-8">
             <button
-              onClick={() => setActiveTab('terminal')}
+              onClick={() => {
+                setActiveTab('terminal');
+                setSelectedUserIds(new Set()); // Очистить выбор при переключении
+              }}
               className={`${
                 activeTab === 'terminal'
                   ? 'border-[rgb(19,91,147)] text-[rgb(19,91,147)]'
@@ -310,7 +413,10 @@ function UsersManagementPage() {
               Роли пользователей терминала
             </button>
             <button
-              onClick={() => setActiveTab('system')}
+              onClick={() => {
+                setActiveTab('system');
+                setSelectedUserIds(new Set()); // Очистить выбор при переключении
+              }}
               className={`${
                 activeTab === 'system'
                   ? 'border-[rgb(19,91,147)] text-[rgb(19,91,147)]'
@@ -349,6 +455,39 @@ function UsersManagementPage() {
             </div>
           )}
 
+          {/* Панель массовых действий */}
+          {selectedUserIds.size > 0 && (
+            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <span className="text-sm font-medium text-gray-900">
+                    Выбрано пользователей: {selectedUserIds.size}
+                  </span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => setShowBulkRoleModal(true)}
+                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-[rgb(19,91,147)] hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)]"
+                  >
+                    Изменить роль
+                  </button>
+                  <button
+                    onClick={() => setShowBulkShiftModal(true)}
+                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                  >
+                    Привязать к смене
+                  </button>
+                  <button
+                    onClick={handleDeselectAll}
+                    className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)]"
+                  >
+                    Снять выделение
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {terminalLoading ? (
             <div className="p-6">Загрузка...</div>
           ) : (
@@ -356,6 +495,20 @@ function UsersManagementPage() {
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <input
+                        type="checkbox"
+                        checked={selectedUserIds.size > 0 && selectedUserIds.size === filteredTerminalUsers.length}
+                        onChange={() => {
+                          if (selectedUserIds.size === filteredTerminalUsers.length) {
+                            handleDeselectAll();
+                          } else {
+                            handleSelectAll();
+                          }
+                        }}
+                        className="h-4 w-4 text-[rgb(19,91,147)] focus:ring-[rgb(19,91,147)] border-gray-300 rounded"
+                      />
+                    </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       ID (Hikvision)
                     </th>
@@ -379,13 +532,21 @@ function UsersManagementPage() {
                 <tbody className="bg-white divide-y divide-gray-200">
                   {filteredTerminalUsers.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="px-6 py-4 text-center text-gray-500">
+                      <td colSpan="7" className="px-6 py-4 text-center text-gray-500">
                         {searchTerm ? 'Пользователи не найдены' : 'Нет пользователей'}
                       </td>
                     </tr>
                   ) : (
                     filteredTerminalUsers.map((user) => (
                       <tr key={user.id}>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <input
+                            type="checkbox"
+                            checked={selectedUserIds.has(user.id)}
+                            onChange={() => handleSelectUser(user.id)}
+                            className="h-4 w-4 text-[rgb(19,91,147)] focus:ring-[rgb(19,91,147)] border-gray-300 rounded"
+                          />
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                           {user.hikvision_id}
                         </td>
@@ -489,9 +650,10 @@ function UsersManagementPage() {
                     <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
                       <button
                         type="submit"
-                        className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:ml-3 sm:w-auto sm:text-sm"
+                        disabled={updateTerminalUserRoleMutation.isPending}
+                        className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed sm:ml-3 sm:w-auto sm:text-sm"
                       >
-                        Сохранить
+                        {updateTerminalUserRoleMutation.isPending ? 'Сохранение...' : 'Сохранить'}
                       </button>
                       <button
                         type="button"
@@ -747,9 +909,10 @@ function UsersManagementPage() {
                     <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
                       <button
                         type="submit"
-                        className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:ml-3 sm:w-auto sm:text-sm"
+                        disabled={updateSystemUserMutation.isPending}
+                        className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed sm:ml-3 sm:w-auto sm:text-sm"
                       >
-                        Сохранить
+                        {updateSystemUserMutation.isPending ? 'Сохранение...' : 'Сохранить'}
                       </button>
                       <button
                         type="button"
@@ -933,6 +1096,198 @@ function UsersManagementPage() {
                       setShiftStartDate('');
                       setShiftEndDate('');
                     }}
+                    className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно массового изменения роли */}
+      {showBulkRoleModal && (
+        <div className="fixed z-10 inset-0 overflow-y-auto">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              onClick={() => setShowBulkRoleModal(false)}
+            ></div>
+
+            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const role = e.target.role.value;
+                bulkUpdateRoleMutation.mutate({
+                  userIds: Array.from(selectedUserIds),
+                  role
+                });
+              }}>
+                <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                  <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                    Изменить роль для выбранных пользователей ({selectedUserIds.size})
+                  </h3>
+
+                  <div className="mb-4">
+                    <div className="max-h-32 overflow-y-auto bg-gray-50 rounded p-2 mb-4">
+                      <p className="text-sm font-medium text-gray-700 mb-2">Выбранные пользователи:</p>
+                      <div className="space-y-1">
+                        {Array.from(selectedUserIds).map(userId => {
+                          const user = filteredTerminalUsers.find(u => u.id === userId);
+                          return user ? (
+                            <div key={userId} className="text-xs text-gray-600">
+                              {user.full_name || user.hikvision_id}
+                            </div>
+                          ) : null;
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Новая роль</label>
+                      <select
+                        name="role"
+                        className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                        required
+                        defaultValue="cleaner"
+                      >
+                        {roles.map((role) => (
+                          <option key={role.value} value={role.value}>
+                            {role.display_name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                  <button
+                    type="submit"
+                    disabled={bulkUpdateRoleMutation.isPending}
+                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    {bulkUpdateRoleMutation.isPending ? 'Применение...' : 'Применить'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowBulkRoleModal(false)}
+                    className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно массовой привязки к смене */}
+      {showBulkShiftModal && (
+        <div className="fixed z-10 inset-0 overflow-y-auto">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              onClick={() => setShowBulkShiftModal(false)}
+            ></div>
+
+            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                const shiftId = formData.get('shiftId');
+                const startDate = formData.get('startDate') || null;
+                const endDate = formData.get('endDate') || null;
+
+                bulkAssignToShiftMutation.mutate({
+                  userIds: Array.from(selectedUserIds),
+                  shiftId,
+                  startDate,
+                  endDate
+                });
+              }}>
+                <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                  <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                    Привязать выбранных пользователей к смене ({selectedUserIds.size})
+                  </h3>
+
+                  <div className="mb-4">
+                    <div className="max-h-32 overflow-y-auto bg-gray-50 rounded p-2 mb-4">
+                      <p className="text-sm font-medium text-gray-700 mb-2">Выбранные пользователи:</p>
+                      <div className="space-y-1">
+                        {Array.from(selectedUserIds).map(userId => {
+                          const user = filteredTerminalUsers.find(u => u.id === userId);
+                          return user ? (
+                            <div key={userId} className="text-xs text-gray-600">
+                              {user.full_name || user.hikvision_id}
+                            </div>
+                          ) : null;
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Смена *</label>
+                        {isLoadingShifts ? (
+                          <div className="text-sm text-gray-500">Загрузка смен...</div>
+                        ) : (
+                          <select
+                            name="shiftId"
+                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                            required
+                          >
+                            <option value="">Выберите смену</option>
+                            {workShifts.map((shift) => (
+                              <option key={shift.id} value={shift.id}>
+                                {shift.name} {shift.description ? `- ${shift.description}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Дата начала (необязательно)
+                        </label>
+                        <input
+                          name="startDate"
+                          type="date"
+                          className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">Если не указано, привязка действует с сегодняшнего дня</p>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Дата окончания (необязательно)
+                        </label>
+                        <input
+                          name="endDate"
+                          type="date"
+                          className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-[rgb(19,91,147)] focus:border-[rgb(19,91,147)]"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">Если не указано, привязка действует бессрочно</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                  <button
+                    type="submit"
+                    disabled={bulkAssignToShiftMutation.isPending}
+                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    {bulkAssignToShiftMutation.isPending ? 'Привязка...' : 'Привязать'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowBulkShiftModal(false)}
                     className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
                   >
                     Отмена

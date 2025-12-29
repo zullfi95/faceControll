@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Скрипт первоначальной настройки сервера для деплоя FaceControll
-# Использование: ssh root@46.62.223.55 'bash -s' < scripts/setup-server.sh
-# Или: скопировать на сервер и выполнить локально
+# ВАЖНО: Этот скрипт должен быть выполнен НА СЕРВЕРЕ локально
+# Использование: скопировать на сервер и выполнить: bash setup-server.sh
 
 set -e
 
@@ -122,18 +122,23 @@ echo "=========================================="
 echo ""
 echo "Следующие шаги:"
 echo ""
-echo "1. Скопируйте проект на сервер:"
-echo "   rsync -avz --exclude 'node_modules' --exclude '__pycache__' --exclude '.git' ./ root@46.62.223.55:/opt/facecontroll/"
+echo "1. Скопируйте проект в директорию /opt/facecontroll"
+echo "   (используйте любой удобный способ: git clone, rsync, scp и т.д.)"
 echo ""
-echo "2. Скопируйте .env файл:"
-echo "   scp .env root@46.62.223.55:/opt/facecontroll/.env"
+echo "2. Создайте и настройте .env файл в директории проекта"
 echo ""
 echo "3. Запустите проект:"
-echo "   ssh root@46.62.223.55 'cd /opt/facecontroll && docker-compose up -d'"
+echo "   cd /opt/facecontroll"
+echo "   docker-compose up -d"
 echo ""
 echo "4. Проверьте статус:"
-echo "   ssh root@46.62.223.55 'cd /opt/facecontroll && docker-compose ps'"
+echo "   docker-compose ps"
 echo ""
+
+
+
+
+
 
 
 
