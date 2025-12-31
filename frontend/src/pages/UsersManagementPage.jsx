@@ -61,6 +61,22 @@ function UsersManagementPage() {
   const [showBulkRoleModal, setShowBulkRoleModal] = useState(false);
   const [showBulkShiftModal, setShowBulkShiftModal] = useState(false);
 
+  // Состояния для синхронизации пользователей
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+  const [selectedDeviceForSync, setSelectedDeviceForSync] = useState(null);
+
+  // Загрузка списка устройств
+  const { data: devices = [], isLoading: isLoadingDevices } = useQuery({
+    queryKey: ['devices'],
+    queryFn: async () => {
+      const res = await axios.get('/api/devices/');
+      return res.data;
+    },
+    enabled: isOperationsManager(),
+    staleTime: 5 * 60 * 1000, // 5 минут
+  });
+
   // Загрузка списка смен
   const { data: workShifts = [], isLoading: isLoadingShifts } = useQuery({
     queryKey: ['work-shifts'],
@@ -215,6 +231,71 @@ function UsersManagementPage() {
       showToast.error('Произошла ошибка при привязке к смене');
     }
   });
+
+  // Мутация для синхронизации пользователей с терминала
+  const syncUsersMutation = useMutation({
+    mutationFn: async (deviceId) => {
+      const res = await axios.post(`/api/devices/${deviceId}/sync-users`);
+      return res.data;
+    },
+    onSuccess: (data) => {
+      setSyncResult(data);
+      // Показываем модальное окно с результатом
+      setShowSyncModal(true);
+      // Обновляем список пользователей
+      fetchTerminalUsers();
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+      
+      if (data.success) {
+        const message = `Синхронизация завершена. Создано: ${data.created}, уже существовало: ${data.existing}`;
+        if (data.errors && data.errors.length > 0) {
+          showToast.warning(`${message}. Ошибок: ${data.errors.length}`);
+        } else {
+          showToast.success(message);
+        }
+      }
+    },
+    onError: (error) => {
+      const errorMsg = error.response?.data?.detail || error.message || 'Ошибка синхронизации';
+      showToast.error(`Ошибка синхронизации: ${errorMsg}`);
+      setSyncResult({
+        success: false,
+        error: errorMsg
+      });
+    }
+  });
+
+  // Обработчик начала синхронизации
+  const handleStartSync = () => {
+    const activeDevices = devices.filter(d => d.is_active);
+    
+    if (activeDevices.length === 0) {
+      showToast.warning('Нет активных устройств для синхронизации');
+      return;
+    }
+    
+    if (activeDevices.length === 1) {
+      // Если только одно устройство, сразу синхронизируем
+      setSelectedDeviceForSync(activeDevices[0]);
+      syncUsersMutation.mutate(activeDevices[0].id);
+    } else {
+      // Если несколько устройств, показываем диалог выбора
+      setShowSyncModal(true);
+      setSelectedDeviceForSync(null);
+      setSyncResult(null);
+    }
+  };
+
+  // Обработчик подтверждения синхронизации с выбранным устройством
+  const handleConfirmSync = () => {
+    if (!selectedDeviceForSync) {
+      showToast.warning('Выберите устройство');
+      return;
+    }
+    
+    setShowSyncModal(false);
+    syncUsersMutation.mutate(selectedDeviceForSync.id);
+  };
 
   // Мутации для системных пользователей
   const updateSystemUserMutation = useMutation({
@@ -437,15 +518,32 @@ function UsersManagementPage() {
               Назначьте роли пользователям из терминала. Только Operations Manager может изменять роли.
             </p>
             
-            {/* Поиск */}
-            <div className="mb-4">
+            {/* Поиск и кнопка синхронизации */}
+            <div className="mb-4 flex items-center gap-4 flex-wrap">
               <input
                 type="text"
                 placeholder="Поиск по имени, ID или отделу..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full max-w-md px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)]"
+                className="flex-1 min-w-[200px] max-w-md px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[rgb(19,91,147)]"
               />
+              <button
+                onClick={handleStartSync}
+                disabled={syncUsersMutation.isPending || isLoadingDevices || devices.filter(d => d.is_active).length === 0}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-[rgb(19,91,147)] hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {syncUsersMutation.isPending ? (
+                  <>
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Синхронизация...
+                  </>
+                ) : (
+                  'Синхронизировать с терминалом'
+                )}
+              </button>
             </div>
           </div>
 
@@ -1294,6 +1392,147 @@ function UsersManagementPage() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно синхронизации пользователей */}
+      {showSyncModal && (
+        <div className="fixed z-10 inset-0 overflow-y-auto">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              onClick={() => {
+                if (!syncUsersMutation.isPending) {
+                  setShowSyncModal(false);
+                  setSelectedDeviceForSync(null);
+                  setSyncResult(null);
+                }
+              }}
+            ></div>
+
+            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+              <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                  Синхронизация пользователей с терминала
+                </h3>
+
+                {!syncResult ? (
+                  <>
+                    <p className="text-sm text-gray-600 mb-4">
+                      Выберите устройство для синхронизации пользователей:
+                    </p>
+                    <div className="space-y-2">
+                      {devices.filter(d => d.is_active).map((device) => (
+                        <label
+                          key={device.id}
+                          className={`flex items-center p-3 border rounded-md cursor-pointer hover:bg-gray-50 ${
+                            selectedDeviceForSync?.id === device.id
+                              ? 'border-[rgb(19,91,147)] bg-blue-50'
+                              : 'border-gray-300'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="device"
+                            value={device.id}
+                            checked={selectedDeviceForSync?.id === device.id}
+                            onChange={() => setSelectedDeviceForSync(device)}
+                            className="h-4 w-4 text-[rgb(19,91,147)] focus:ring-[rgb(19,91,147)] border-gray-300"
+                          />
+                          <div className="ml-3">
+                            <div className="text-sm font-medium text-gray-900">{device.name}</div>
+                            <div className="text-xs text-gray-500">{device.ip_address}</div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    {syncResult.success ? (
+                      <>
+                        <div className="bg-green-50 border border-green-200 rounded-md p-4">
+                          <p className="text-sm font-medium text-green-800 mb-2">
+                            Синхронизация завершена успешно
+                          </p>
+                          <div className="text-sm text-green-700 space-y-1">
+                            <p>Всего пользователей на терминале: {syncResult.total}</p>
+                            <p>Создано новых: <strong>{syncResult.created}</strong></p>
+                            <p>Уже существовало: <strong>{syncResult.existing}</strong></p>
+                            {syncResult.errors && syncResult.errors.length > 0 && (
+                              <p className="text-orange-700">Ошибок при обработке: {syncResult.errors.length}</p>
+                            )}
+                          </div>
+                        </div>
+                        {syncResult.errors && syncResult.errors.length > 0 && (
+                          <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4 max-h-40 overflow-y-auto">
+                            <p className="text-sm font-medium text-yellow-800 mb-2">Ошибки:</p>
+                            <ul className="text-xs text-yellow-700 space-y-1">
+                              {syncResult.errors.slice(0, 10).map((error, idx) => (
+                                <li key={idx}>
+                                  {error.employee_no || 'Unknown'}: {error.error}
+                                </li>
+                              ))}
+                              {syncResult.errors.length > 10 && (
+                                <li>... и еще {syncResult.errors.length - 10} ошибок</li>
+                              )}
+                            </ul>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="bg-red-50 border border-red-200 rounded-md p-4">
+                        <p className="text-sm font-medium text-red-800">
+                          Ошибка синхронизации
+                        </p>
+                        <p className="text-sm text-red-700 mt-1">
+                          {syncResult.error || 'Неизвестная ошибка'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                {!syncResult ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleConfirmSync}
+                      disabled={!selectedDeviceForSync || syncUsersMutation.isPending}
+                      className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed sm:ml-3 sm:w-auto sm:text-sm"
+                    >
+                      {syncUsersMutation.isPending ? 'Синхронизация...' : 'Синхронизировать'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSyncModal(false);
+                        setSelectedDeviceForSync(null);
+                      }}
+                      disabled={syncUsersMutation.isPending}
+                      className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] disabled:opacity-50 disabled:cursor-not-allowed sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
+                    >
+                      Отмена
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSyncModal(false);
+                      setSelectedDeviceForSync(null);
+                      setSyncResult(null);
+                    }}
+                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-[rgb(19,91,147)] text-base font-medium text-white hover:bg-[rgb(30,120,180)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[rgb(19,91,147)] sm:ml-3 sm:w-auto sm:text-sm"
+                  >
+                    Закрыть
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

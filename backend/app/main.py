@@ -1317,15 +1317,32 @@ async def check_device_status(device_id: int, db: AsyncSession = Depends(databas
         client = HikvisionClient(device.ip_address, device.username, password)
         
         logger.info("Calling check_connection()...")
-        connected, error_msg = await client.check_connection()
+        # Используем короткий таймаут для быстрой проверки
+        try:
+            connected, error_msg = await asyncio.wait_for(
+                client.check_connection(),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            connected = False
+            error_msg = "Устройство недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
+        
         logger.info(f"Connection result: {connected}, error: {error_msg}")
         
         device_info = None
         
         if connected:
-            logger.info("Calling get_device_info()...")
-            device_info = await client.get_device_info()
-            logger.info(f"Device info result: {device_info}")
+            try:
+                logger.info("Calling get_device_info()...")
+                device_info = await asyncio.wait_for(
+                    client.get_device_info(),
+                    timeout=3.0
+                )
+                logger.info(f"Device info result: {device_info}")
+            except asyncio.TimeoutError:
+                logger.warning("Timeout getting device info")
+            except Exception as e:
+                logger.warning(f"Error getting device info: {e}")
         else:
             logger.warning(f"Device not connected: {error_msg}")
         
@@ -1616,6 +1633,141 @@ async def get_terminal_users(
         logger.error(f"Error getting terminal users for device {device_id}: {e}", exc_info=True)
         # Возвращаем пустой результат с пагинацией вместо 500 ошибки
         return {"total": 0, "skip": skip, "limit": limit, "users": []}
+
+@app.post("/devices/{device_id}/sync-users")
+async def sync_users_from_terminal(
+    device_id: int,
+    db: AsyncSession = Depends(database.get_db),
+    current_user: models.SystemUser = Depends(require_operations_manager)
+) -> Dict[str, Any]:
+    """
+    Синхронизация пользователей с терминала в базу данных.
+    
+    Получает список пользователей с терминала и добавляет их в БД,
+    если они еще не существуют.
+    
+    Returns:
+        Статистика синхронизации: created, existing, total, errors
+    """
+    from .enums import UserRole
+    
+    device = await crud.get_device_by_id(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    created_count = 0
+    existing_count = 0
+    errors = []
+    
+    try:
+        password = get_device_password_safe(device, device.id)
+        client = HikvisionClient(device.ip_address, device.username, password)
+        
+        # Проверка соединения
+        connected, error_msg = await client.check_connection()
+        if not connected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device {device_id} not accessible: {error_msg}"
+            )
+        
+        # Получаем список пользователей с терминала
+        terminal_users = await client.get_users()
+        
+        if terminal_users is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to get users from terminal"
+            )
+        
+        if not terminal_users:
+            return {
+                "success": True,
+                "created": 0,
+                "existing": 0,
+                "total": 0,
+                "errors": []
+            }
+        
+        # Обрабатываем каждого пользователя
+        for terminal_user in terminal_users:
+            try:
+                # Извлекаем данные из структуры Hikvision
+                employee_no = terminal_user.get("employeeNo")
+                name = terminal_user.get("name", "")
+                
+                if not employee_no:
+                    errors.append({
+                        "user": terminal_user,
+                        "error": "Missing employeeNo"
+                    })
+                    continue
+                
+                # Проверяем, существует ли пользователь в БД
+                existing_user = await crud.get_user_by_hik_id(db, employee_no)
+                
+                if existing_user:
+                    existing_count += 1
+                    logger.debug(f"User {employee_no} already exists in database")
+                else:
+                    # Создаем нового пользователя
+                    user_create = schemas.UserCreate(
+                        hikvision_id=employee_no,
+                        full_name=name or employee_no,  # Используем employeeNo если name пустой
+                        department=None,  # Department может быть в других полях, но пока оставляем None
+                        role=UserRole.CLEANER.value  # Роль по умолчанию
+                    )
+                    
+                    await crud.create_user(db, user_create)
+                    created_count += 1
+                    logger.info(f"Created user {employee_no} ({name}) in database")
+                    
+            except ValueError as ve:
+                # Ошибка валидации hikvision_id
+                errors.append({
+                    "employee_no": employee_no,
+                    "error": f"Validation error: {str(ve)}"
+                })
+                logger.warning(f"Validation error for user {employee_no}: {ve}")
+            except Exception as e:
+                errors.append({
+                    "employee_no": employee_no,
+                    "error": str(e)
+                })
+                logger.error(f"Error processing user {employee_no}: {e}", exc_info=True)
+        
+        total_processed = created_count + existing_count + len(errors)
+        
+        return {
+            "success": True,
+            "created": created_count,
+            "existing": existing_count,
+            "total": len(terminal_users),
+            "processed": total_processed,
+            "errors": errors
+        }
+        
+    except HTTPException:
+        raise
+    except PermissionError as pe:
+        logger.warning(f"Insufficient permissions for device {device_id}: {str(pe)}")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Insufficient permissions: {str(pe)}"
+        )
+    except Exception as e:
+        logger.error(f"Error syncing users from terminal {device_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error syncing users: {str(e)}"
+        )
+    finally:
+        # Закрываем клиент, если он был создан
+        try:
+            if 'client' in locals():
+                await client.close()
+        except:
+            pass
 
 @app.get("/devices/{device_id}/terminal-users/compare")
 async def compare_terminal_users(
@@ -2527,43 +2679,30 @@ async def get_device_events(
     device_id: int,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    max_records: int = 100,
+    max_records: int = 1000,
     db: AsyncSession = Depends(database.get_db)
 ):
     """
-    Получение событий аутентификации напрямую с терминала Hikvision через ISAPI.
+    Получение событий аутентификации из базы данных.
+    События сохраняются в БД через webhook от терминала Hikvision.
 
     Args:
         device_id: ID устройства
         start_date: Начальная дата в формате YYYY-MM-DD (по умолчанию - вчера)
         end_date: Конечная дата в формате YYYY-MM-DD (по умолчанию - сейчас)
-        max_records: Максимальное количество записей (по умолчанию 100)
+        max_records: Максимальное количество записей (по умолчанию 1000)
 
     Returns:
-        Список событий с терминала
+        Список событий из базы данных
     """
     from datetime import datetime, timedelta
+    from sqlalchemy import and_
 
     device = await crud.get_device_by_id(db, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
     try:
-        # Расшифровка пароля
-        try:
-            password = get_device_password_safe(device, device.id)
-        except HTTPException as e:
-            raise HTTPException(status_code=400, detail=f"Cannot decrypt device password: {e.detail}")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Error decrypting password: {str(e)}")
-        
-        client = HikvisionClient(device.ip_address, device.username, password)
-
-        # Проверка соединения
-        connected, error_msg = await client.check_connection()
-        if not connected:
-            raise HTTPException(status_code=503, detail=f"Device is not accessible: {error_msg}")
-
         # Определяем период
         try:
             if start_date:
@@ -2579,19 +2718,35 @@ async def get_device_events(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
-        logger.info(f"[GET_EVENTS] Getting events from device {device_id} ({device.name}) for period {start_datetime} to {end_datetime}")
+        logger.info(f"[GET_EVENTS] Getting events from DB for device {device_id} ({device.name}) for period {start_datetime} to {end_datetime}")
 
-        # Получаем события с терминала
-        try:
-            events = await client.get_attendance_records(
-                start_time=start_datetime,
-                end_time=end_datetime,
-                max_records=max_records
+        # Получаем события из БД, фильтруя по IP адресу терминала
+        events_query = select(models.AttendanceEvent).filter(
+            and_(
+                models.AttendanceEvent.terminal_ip == device.ip_address,
+                models.AttendanceEvent.timestamp >= start_datetime,
+                models.AttendanceEvent.timestamp <= end_datetime
             )
-            logger.info(f"[GET_EVENTS] Retrieved {len(events)} events from terminal")
-        except Exception as e:
-            logger.error(f"[GET_EVENTS] Error in get_attendance_records: {e}", exc_info=True)
-            raise
+        ).order_by(models.AttendanceEvent.timestamp.desc()).limit(max_records)
+        
+        result = await db.execute(events_query)
+        db_events = result.scalars().all()
+
+        # Преобразуем события из БД в формат, совместимый с форматом терминала
+        events = []
+        for event in db_events:
+            events.append({
+                "employeeNo": event.employee_no or "",
+                "name": event.name or "",
+                "cardNo": event.card_no or "",
+                "cardReaderNo": event.card_reader_id or "",
+                "eventType": event.event_type_code or event.event_type or "",
+                "eventDescription": event.event_type_description or "",
+                "time": event.timestamp.isoformat() if event.timestamp else "",
+                "remoteHostIP": event.remote_host_ip or ""
+            })
+
+        logger.info(f"[GET_EVENTS] Retrieved {len(events)} events from database")
 
         return {
             "success": True,
@@ -2602,7 +2757,8 @@ async def get_device_events(
             "period": {
                 "start_date": start_datetime.isoformat(),
                 "end_date": end_datetime.isoformat()
-            }
+            },
+            "source": "database"
         }
 
     except HTTPException:
