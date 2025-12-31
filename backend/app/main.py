@@ -749,16 +749,44 @@ async def upload_user_photo(
     unique_filename = f"{user.hikvision_id}_{uuid.uuid4().hex}.{file_extension}"
     file_path = UPLOAD_DIR / unique_filename
 
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Убеждаемся, что директория существует
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        content = await file.read()
+        logger.info(f"Saving photo for user {user_id}: {file_path}, size: {len(content)} bytes")
+        
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        # Проверяем, что файл действительно сохранен
+        if not file_path.exists():
+            raise IOError(f"Photo file was not saved: {file_path}")
+        
+        file_size = file_path.stat().st_size
+        logger.info(f"Photo file saved successfully: {file_path}, size: {file_size} bytes")
+        
+    except Exception as e:
+        logger.error(f"Error saving photo file for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save photo file: {str(e)}")
 
     # Обновление пользователя
     user.photo_path = f"/uploads/{unique_filename}"
-    await db.commit()
-    await db.refresh(user)
+    try:
+        await db.commit()
+        await db.refresh(user)
+        logger.info(f"Photo path updated in database for user {user_id}: {user.photo_path}")
+    except Exception as e:
+        logger.error(f"Error updating photo_path in database for user {user_id}: {e}", exc_info=True)
+        # Пытаемся удалить сохраненный файл, если не удалось обновить БД
+        try:
+            if file_path.exists():
+                file_path.unlink()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Failed to update photo path in database: {str(e)}")
 
-    logger.info(f"Photo uploaded for user {user_id}: {user.photo_path}")
+    logger.info(f"Photo uploaded successfully for user {user_id}: {user.photo_path}")
     return {"message": "Photo uploaded successfully", "photo_path": user.photo_path}
 
 @app.post("/users/{user_id}/sync-to-device")

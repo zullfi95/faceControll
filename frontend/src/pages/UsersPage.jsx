@@ -207,18 +207,50 @@ const UsersPage = () => {
       const userResponse = await axios.post('/api/users/', newUser);
       const userId = userResponse.data.id;
       
-      // Шаг 2: Загрузка фото (только если это НЕ placeholder)
-      const isPlaceholder = newUserPhoto.size === 0;
+      // Шаг 2: Загрузка фото
+      // Placeholder создается когда фото захвачено на терминале, но предпросмотр недоступен
+      // В этом случае фото уже на терминале, загружать на сервер не нужно
+      const isPlaceholder = newUserPhoto.name.includes('terminal_captured') && newUserPhoto.size === 0;
       
-      if (!isPlaceholder) {
-        setCreationStep('Загрузка фото...');
-        const formData = new FormData();
-        formData.append('file', newUserPhoto);
-        await axios.post(`/api/users/${userId}/upload-photo`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-      } else {
+      if (isPlaceholder) {
+        // Фото уже на терминале, пропускаем загрузку на сервер
         setCreationStep('Используется фото с терминала...');
+        console.log(`Skipping photo upload for user ${userId} - using terminal captured photo`);
+      } else if (newUserPhoto && newUserPhoto.size > 0) {
+        // Загружаем фото на сервер
+        setCreationStep('Загрузка фото...');
+        try {
+          console.log(`Uploading photo for user ${userId}:`, {
+            name: newUserPhoto.name,
+            size: newUserPhoto.size,
+            type: newUserPhoto.type
+          });
+          
+          const formData = new FormData();
+          formData.append('file', newUserPhoto);
+          
+          const uploadResponse = await axios.post(`/api/users/${userId}/upload-photo`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          
+          console.log(`Photo uploaded successfully for user ${userId}:`, uploadResponse.data);
+          showToast.success('Фото успешно загружено');
+        } catch (photoError) {
+          const photoErrorMsg = photoError.response?.data?.detail || photoError.message || 'Ошибка загрузки фото';
+          console.error(`Failed to upload photo for user ${userId}:`, photoError, {
+            response: photoError.response?.data,
+            status: photoError.response?.status
+          });
+          // Не прерываем процесс, но показываем предупреждение
+          showToast.warning(`Фото не загружено: ${photoErrorMsg}. Пользователь создан, но без фото.`);
+        }
+      } else {
+        // Фото не выбрано или пустое
+        console.warn(`No photo to upload for user ${userId}`, {
+          hasPhoto: !!newUserPhoto,
+          size: newUserPhoto?.size
+        });
+        setCreationStep('Пропуск загрузки фото (фото не выбрано)...');
       }
       
       // Шаг 3: Синхронизация с устройством
