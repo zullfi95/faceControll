@@ -2355,15 +2355,15 @@ async def get_daily_report(
                         for assignment in active_assignments:
                             user = assignment.user
                             user_events = sorted(events_by_user.get(user.id, []), key=lambda x: x.timestamp)
-                            
-                            # Парсим сессии из событий (передаем дату отчета и конец смены для правильной обработки незакрытых сессий)
-                            shift_end_for_parsing = shift_time_range[1] if shift_time_range else None
-                            sessions = parse_sessions_from_events(user_events, report_date=report_datetime, shift_end=shift_end_for_parsing)
-                            
+
                             # Получаем расписание смены для этого дня
                             shift_time_range = None
                             if day_schedule:
                                 shift_time_range = get_shift_time_range(shift, report_datetime)
+
+                            # Парсим сессии из событий (передаем дату отчета и конец смены для правильной обработки незакрытых сессий)
+                            shift_end_for_parsing = shift_time_range[1] if shift_time_range else None
+                            sessions = parse_sessions_from_events(user_events, report_date=report_datetime, shift_end=shift_end_for_parsing)
                                 if shift_time_range:
                                     pass
                                 else:
