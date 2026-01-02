@@ -2364,13 +2364,13 @@ async def get_daily_report(
                             # Парсим сессии из событий (передаем дату отчета и конец смены для правильной обработки незакрытых сессий)
                             shift_end_for_parsing = shift_time_range[1] if shift_time_range else None
                             sessions = parse_sessions_from_events(user_events, report_date=report_datetime, shift_end=shift_end_for_parsing)
-                                if shift_time_range:
-                                    pass
-                                else:
-                                    logger.warning(
-                                        f"No shift time range for user {user.id} on {report_date} "
-                                        f"(shift {shift.name}, weekday {day_of_week})"
-                                    )
+
+                            # Проверяем, удалось ли получить время смены
+                            if not shift_time_range:
+                                logger.warning(
+                                    f"No shift time range for user {user.id} on {report_date} "
+                                    f"(shift {shift.name}, weekday {day_of_week})"
+                                )
                             
                             # Рассчитываем часы (передаем user_id для логирования)
                             if shift_time_range:
