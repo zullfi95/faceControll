@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, text
 from typing import List, Dict, Any, Optional
 import os
 import uuid
@@ -189,7 +189,7 @@ async def health_check():
     # Проверяем подключение к БД
     try:
         async for db in database.get_db_session():
-            await db.execute("SELECT 1")
+            await db.execute(text("SELECT 1"))
             db_status = "healthy"
             break
     except Exception as e:
