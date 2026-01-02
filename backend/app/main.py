@@ -29,6 +29,41 @@ from .config import settings
 from fastapi import Request, Header
 from fastapi.security import OAuth2PasswordRequestForm
 
+# Настройка структурированного логирования
+class StructuredFormatter(logging.Formatter):
+    """Форматтер для структурированного логирования в JSON."""
+
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        # Добавляем request_id если доступен
+        if hasattr(record, 'request_id'):
+            log_entry["request_id"] = record.request_id
+
+        # Добавляем дополнительные поля из record
+        if hasattr(record, 'extra_fields'):
+            log_entry.update(record.extra_fields)
+
+        # Добавляем exception info если есть
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
+        return json.dumps(log_entry, ensure_ascii=False)
+
+# Настройка корневого логгера
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Создаем обработчик для stdout с структурированным форматом
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(StructuredFormatter())
+root_logger.addHandler(console_handler)
+
 UPLOAD_DIR = Path("uploads")
 
 
@@ -73,6 +108,24 @@ validate_environment()
 app = FastAPI(title="Face Access Control System")
 
 logger = logging.getLogger(__name__)
+
+# Middleware для добавления request ID
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    import uuid
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    # Добавляем request_id в логи
+    logger.info(f"Request started: {request.method} {request.url.path} - ID: {request_id}")
+
+    response = await call_next(request)
+
+    # Добавляем request_id в заголовки ответа
+    response.headers["X-Request-ID"] = request_id
+    logger.info(f"Request completed: {request.method} {request.url.path} - ID: {request_id} - Status: {response.status_code}")
+
+    return response
 
 def get_device_password_safe(device, device_id: int = None) -> str:
     """
@@ -126,6 +179,38 @@ async def get_uploaded_file(filename: str):
         }
     )
 
+
+@app.get("/health")
+async def health_check():
+    """Проверка здоровья приложения."""
+    from datetime import datetime
+    import platform
+
+    # Проверяем подключение к БД
+    try:
+        async for db in database.get_db_session():
+            await db.execute("SELECT 1")
+            db_status = "healthy"
+            break
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+
+    # Собираем информацию о системе (упрощенная версия без psutil)
+    health_info = {
+        "status": "healthy" if db_status == "healthy" else "unhealthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0.0",
+        "environment": settings.environment,
+        "database": db_status,
+        "system": {
+            "platform": platform.system(),
+            "python_version": platform.python_version(),
+        },
+        "telegram_bot_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
+    }
+
+    return health_info
+
 telegram_bot = None
 daily_report_service = None
 daily_report_task = None  # Фоновая задача для ежедневных отчетов
@@ -174,15 +259,13 @@ async def send_daily_reports_automatically():
 
 @app.on_event("startup")
 async def startup():
-    """Инициализация базы данных, телеграм бота и Device Manager при запуске приложения."""
-    # Инициализация базы данных
-    async with database.engine.begin() as conn:
-        await conn.run_sync(models.Base.metadata.create_all)
+    """Инициализация телеграм бота и Device Manager при запуске приложения."""
+    # База данных инициализируется через Alembic миграции
 
     # Инициализация телеграм бота
     global telegram_bot, daily_report_service, daily_report_task, auto_close_sessions_task
-    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    telegram_token = settings.telegram_bot_token
+    telegram_chat_id = settings.telegram_chat_id
 
     if telegram_token and telegram_chat_id:
         telegram_bot = TelegramBot(telegram_token, telegram_chat_id)
@@ -1014,22 +1097,39 @@ async def sync_user_to_multiple_devices(
                     failed_count += 1
                     continue
                 
-                # Проверяем соединение
-                connected, error = await client.check_connection()
-                if not connected:
-                    await crud.update_device_sync_status(
-                        db, user_id, device_id, 'failed',
-                        f"Connection failed: {error}"
-                    )
-                    results.append(schemas.SyncToDevicesResult(
-                        device_id=device_id,
-                        device_name=device.name,
-                        status="failed",
-                        message=f"Connection failed",
-                        error=error
-                    ))
-                    failed_count += 1
-                    continue
+                # Проверяем соединение (для синхронизации нужен прямой доступ к терминалу)
+                # Увеличиваем таймаут для синхронизации
+                original_timeout = client.timeout
+                client.timeout = 30  # Увеличиваем таймаут для синхронизации
+                
+                try:
+                    connected, error = await client.check_connection()
+                    if not connected:
+                        # Для webhook режима устройство может быть недоступно для входящих соединений
+                        # Но для синхронизации нужен прямой доступ, поэтому все равно пытаемся выполнить операцию
+                        if error and ("webhook" in error.lower() or "недоступно для входящих" in error.lower()):
+                            logger.warning(f"Device {device_id} may be in webhook mode, but attempting sync anyway")
+                            # Продолжаем попытку синхронизации, но с предупреждением
+                        elif error and ("401" in error or "403" in error or "учетные данные" in error.lower() or "доступ запрещен" in error.lower()):
+                            # Для ошибок аутентификации/авторизации блокируем синхронизацию
+                            await crud.update_device_sync_status(
+                                db, user_id, device_id, 'failed',
+                                f"Connection failed: {error}"
+                            )
+                            results.append(schemas.SyncToDevicesResult(
+                                device_id=device_id,
+                                device_name=device.name,
+                                status="failed",
+                                message=f"Ошибка подключения к терминалу",
+                                error=error
+                            ))
+                            failed_count += 1
+                            continue
+                        else:
+                            # Для других ошибок (таймаут, сеть и т.д.) все равно пытаемся синхронизировать
+                            logger.warning(f"Device {device_id} connection check failed: {error}, but attempting sync anyway")
+                finally:
+                    client.timeout = original_timeout
                 
                 # Создаем пользователя на терминале
                 result = await client.create_user_basic(
@@ -1039,34 +1139,85 @@ async def sync_user_to_multiple_devices(
                 )
                 
                 if result.get("success"):
-                    # Привязываем фото (если есть)
-                    face_url = f"{client.base_url}/LOCALS/pic/web_face_enrollpic.jpg@WEB000000000020"
-                    face_result = await client.setup_user_face_fdlib(
-                        employee_no=user.hikvision_id,
-                        face_url=face_url
-                    )
+                    # Загружаем фото на терминал (если есть на сервере)
+                    photo_uploaded = False
+                    if user.photo_path:
+                        try:
+                            # Читаем фото с сервера
+                            photo_filename = Path(user.photo_path).name
+                            photo_file_path = UPLOAD_DIR / photo_filename
+                            
+                            if photo_file_path.exists():
+                                with open(photo_file_path, "rb") as f:
+                                    photo_bytes = f.read()
+                                
+                                # Загружаем фото на терминал
+                                upload_result = await client.upload_face_image_to_terminal(
+                                    employee_no=user.hikvision_id,
+                                    image_bytes=photo_bytes
+                                )
+                                
+                                if upload_result.get("success"):
+                                    photo_uploaded = True
+                                    logger.info(f"Photo uploaded to terminal {device_id} for user {user.hikvision_id}")
+                                else:
+                                    logger.warning(f"Failed to upload photo to terminal {device_id} for user {user.hikvision_id}: {upload_result.get('error')}")
+                            else:
+                                logger.warning(f"Photo file not found on server for user {user.hikvision_id}: {photo_file_path}")
+                        except Exception as e:
+                            logger.error(f"Error uploading photo for user {user.hikvision_id} to device {device_id}: {e}", exc_info=True)
+                    
+                    # Если фото не загружено, пытаемся использовать локальный URL (для обратной совместимости)
+                    if not photo_uploaded:
+                        face_url = f"{client.base_url}/LOCALS/pic/web_face_enrollpic.jpg@WEB000000000020"
+                        face_result = await client.setup_user_face_fdlib(
+                            employee_no=user.hikvision_id,
+                            face_url=face_url
+                        )
+                        if face_result.get("success"):
+                            logger.info(f"Face linked via URL for user {user.hikvision_id} on device {device_id}")
                     
                     # Обновляем статус синхронизации
                     await crud.update_device_sync_status(db, user_id, device_id, 'synced')
+                    
+                    sync_message = "Successfully synced"
+                    if photo_uploaded:
+                        sync_message += " with photo"
+                    elif not user.photo_path:
+                        sync_message += " (no photo)"
+                    else:
+                        sync_message += " (photo upload failed)"
                     
                     results.append(schemas.SyncToDevicesResult(
                         device_id=device_id,
                         device_name=device.name,
                         status="synced",
-                        message="Successfully synced"
+                        message=sync_message
                     ))
                     synced_count += 1
                 else:
+                    error_msg = result.get('error', 'Unknown error')
+                    # Улучшаем сообщение об ошибке для пользователя
+                    user_friendly_message = "Не удалось синхронизировать пользователя с терминалом"
+                    if "недоступно для входящих" in error_msg.lower() or "webhook" in error_msg.lower():
+                        user_friendly_message = "Терминал недоступен для входящих соединений. Для синхронизации пользователей необходим прямой доступ к терминалу (не webhook режим). Проверьте сетевые настройки и доступность терминала."
+                    elif "timeout" in error_msg.lower() or "таймаут" in error_msg.lower():
+                        user_friendly_message = "Таймаут подключения к терминалу. Проверьте доступность терминала в сети."
+                    elif "401" in error_msg or "учетные данные" in error_msg.lower():
+                        user_friendly_message = "Ошибка аутентификации. Проверьте учетные данные терминала в настройках устройства."
+                    elif "403" in error_msg or "доступ запрещен" in error_msg.lower():
+                        user_friendly_message = "Доступ запрещен. Проверьте права пользователя терминала."
+                    
                     await crud.update_device_sync_status(
                         db, user_id, device_id, 'failed',
-                        result.get('error', 'Unknown error')
+                        error_msg
                     )
                     results.append(schemas.SyncToDevicesResult(
                         device_id=device_id,
                         device_name=device.name,
                         status="failed",
-                        message="Failed to create user on terminal",
-                        error=result.get('error')
+                        message=user_friendly_message,
+                        error=error_msg
                     ))
                     failed_count += 1
                 
@@ -2205,8 +2356,9 @@ async def get_daily_report(
                             user = assignment.user
                             user_events = sorted(events_by_user.get(user.id, []), key=lambda x: x.timestamp)
                             
-                            # Парсим сессии из событий (передаем дату отчета для правильной обработки незакрытых сессий)
-                            sessions = parse_sessions_from_events(user_events, report_date=report_datetime)
+                            # Парсим сессии из событий (передаем дату отчета и конец смены для правильной обработки незакрытых сессий)
+                            shift_end_for_parsing = shift_time_range[1] if shift_time_range else None
+                            sessions = parse_sessions_from_events(user_events, report_date=report_datetime, shift_end=shift_end_for_parsing)
                             
                             # Получаем расписание смены для этого дня
                             shift_time_range = None
@@ -2249,8 +2401,31 @@ async def get_daily_report(
                             last_event_type = None
                             status = "Absent"
                             
+                            # Определяем первое событие входа в рамках смены
+                            # Для ночных смен важно брать первое событие именно в период смены, а не первое событие вообще
+                            if shift_time_range:
+                                shift_start, shift_end = shift_time_range
+                                # Ищем первое событие "entry" в период смены
+                                for event in user_events:
+                                    if event.event_type == "entry" and shift_start <= event.timestamp <= shift_end:
+                                        first_entry_time = event.timestamp
+                                        break
+                            
+                            # Если не нашли в смене, используем первое событие из сессий или событий
+                            if first_entry_time is None:
+                                if sessions:
+                                    first_entry_time = sessions[0][0]  # Первая сессия - вход
+                                elif user_events:
+                                    # Берем первое событие "entry", если есть
+                                    for event in user_events:
+                                        if event.event_type == "entry":
+                                            first_entry_time = event.timestamp
+                                            break
+                                    # Если нет entry событий, берем первое событие вообще
+                                    if first_entry_time is None:
+                                        first_entry_time = user_events[0].timestamp
+                            
                             if sessions:
-                                first_entry_time = sessions[0][0]  # Первая сессия - вход
                                 # Используем последнее событие для определения типа и времени
                                 if user_events:
                                     last_entry_exit_time = user_events[-1].timestamp
@@ -2269,9 +2444,10 @@ async def get_daily_report(
                                     if hours_in_shift + hours_outside_shift > 0:
                                         status = "Present"
                             elif user_events:
-                                first_entry_time = user_events[0].timestamp
-                                last_entry_exit_time = user_events[-1].timestamp
-                                last_event_type = user_events[-1].event_type
+                                if last_entry_exit_time is None:
+                                    last_entry_exit_time = user_events[-1].timestamp
+                                if last_event_type is None:
+                                    last_event_type = user_events[-1].event_type
                                 status = "Present (no exit)"
                             
                             # Вычисляем время начала смены и опоздание
@@ -2557,8 +2733,8 @@ async def get_telegram_status(current_user: models.SystemUser = Depends(require_
     return {
         "telegram_bot_configured": telegram_bot is not None,
         "daily_report_service_configured": daily_report_service is not None,
-        "telegram_token_set": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-        "telegram_chat_id_set": bool(os.getenv("TELEGRAM_CHAT_ID"))
+        "telegram_token_set": bool(settings.telegram_bot_token),
+        "telegram_chat_id_set": bool(settings.telegram_chat_id)
     }
 
 @app.post("/admin/cleanup-database")
@@ -2731,27 +2907,35 @@ async def get_device_events(
         raise HTTPException(status_code=404, detail="Device not found")
 
     try:
-        # Определяем период
+        # Определяем период (используем UTC для согласованности с событиями в БД)
+        from datetime import timezone
         try:
             if start_date:
                 start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+                # Делаем timezone-aware (UTC)
+                start_datetime = start_datetime.replace(tzinfo=timezone.utc)
             else:
-                start_datetime = datetime.now() - timedelta(days=1)  # Вчера
+                start_datetime = datetime.now(timezone.utc) - timedelta(days=1)  # Вчера
 
             if end_date:
                 end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
-                end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+                end_datetime = end_datetime.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
             else:
-                end_datetime = datetime.now()  # Сейчас
+                end_datetime = datetime.now(timezone.utc)  # Сейчас
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
         logger.info(f"[GET_EVENTS] Getting events from DB for device {device_id} ({device.name}) for period {start_datetime} to {end_datetime}")
 
         # Получаем события из БД, фильтруя по IP адресу терминала
+        # Используем remote_host_ip или terminal_ip для совместимости
+        from sqlalchemy import or_
         events_query = select(models.AttendanceEvent).filter(
             and_(
-                models.AttendanceEvent.terminal_ip == device.ip_address,
+                or_(
+                    models.AttendanceEvent.terminal_ip == device.ip_address,
+                    models.AttendanceEvent.remote_host_ip == device.ip_address
+                ),
                 models.AttendanceEvent.timestamp >= start_datetime,
                 models.AttendanceEvent.timestamp <= end_datetime
             )
@@ -2761,17 +2945,20 @@ async def get_device_events(
         db_events = result.scalars().all()
 
         # Преобразуем события из БД в формат, совместимый с форматом терминала
+        # Используем snake_case для совместимости с фронтендом
         events = []
         for event in db_events:
             events.append({
-                "employeeNo": event.employee_no or "",
+                "employee_no": event.employee_no or "",
                 "name": event.name or "",
-                "cardNo": event.card_no or "",
-                "cardReaderNo": event.card_reader_id or "",
-                "eventType": event.event_type_code or event.event_type or "",
-                "eventDescription": event.event_type_description or "",
-                "time": event.timestamp.isoformat() if event.timestamp else "",
-                "remoteHostIP": event.remote_host_ip or ""
+                "card_no": event.card_no or "",
+                "card_reader_id": event.card_reader_id or "",
+                "event_type": event.event_type or "",
+                "event_type_code": event.event_type_code or "",
+                "event_type_description": event.event_type_description or "",
+                "timestamp": event.timestamp.isoformat() if event.timestamp else "",
+                "remote_host_ip": event.remote_host_ip or "",
+                "device_name": device.name or ""
             })
 
         logger.info(f"[GET_EVENTS] Retrieved {len(events)} events from database")
@@ -3057,12 +3244,12 @@ async def configure_webhook(
         
         # Определяем IP сервера
         if not server_ip:
-            # Пробуем получить из переменных окружения
-            server_ip = os.getenv("SERVER_IP")
+            # Пробуем получить из настроек
+            server_ip = settings.server_ip
             if not server_ip:
                 # Если не указан, используем IP устройства (предполагаем, что сервер в той же сети)
                 # Или можно использовать VPN IP
-                terminal_vpn_ip = os.getenv("TERMINAL_IN_IP", "").rsplit(".", 1)[0] + ".1" if os.getenv("TERMINAL_IN_IP") else None
+                terminal_vpn_ip = settings.terminal_in_ip.rsplit(".", 1)[0] + ".1" if settings.terminal_in_ip else None
                 if terminal_vpn_ip:
                     server_ip = terminal_vpn_ip
                 else:
@@ -3129,7 +3316,14 @@ async def receive_webhook_event(
                 if x_api_key != WEBHOOK_API_KEY:
                     raise HTTPException(status_code=401, detail="Invalid API key")
         
-        terminal_ip = request.client.host if request.client else "unknown"
+        # Получаем IP терминала из заголовков или client.host
+        # X-Forwarded-For содержит реальный IP клиента за прокси
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            # X-Forwarded-For может содержать несколько IP через запятую
+            terminal_ip = forwarded_for.split(",")[0].strip()
+        else:
+            terminal_ip = request.client.host if request.client else "unknown"
         
         event_data = None
         try:
@@ -3164,6 +3358,15 @@ async def receive_webhook_event(
                 "status": "received",
                 "message": "Event parsed but no data extracted"
             }
+        
+        # Используем remote_host_ip из события как terminal_ip, если он есть
+        # Это реальный IP терминала, который отправляет событие
+        remote_host_ip = parsed_event.get("remote_host_ip")
+        if remote_host_ip and remote_host_ip != "unknown":
+            terminal_ip = remote_host_ip
+            logger.info(f"[WEBHOOK] Using remote_host_ip {remote_host_ip} as terminal_ip")
+        else:
+            logger.info(f"[WEBHOOK] Using terminal_ip from request: {terminal_ip}, remote_host_ip: {remote_host_ip}")
         
         try:
             parsed_event["terminal_ip"] = terminal_ip

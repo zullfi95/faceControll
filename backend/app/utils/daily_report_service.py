@@ -193,11 +193,8 @@ class DailyReportService:
                 if not user:
                     continue
 
-                # Парсим сессии (передаем дату отчета для правильной обработки незакрытых сессий)
+                # Получаем активную смену пользователя на эту дату (нужно для правильной обработки незакрытых сессий)
                 report_datetime = datetime.combine(report_date, time.min, tzinfo=BAKU_TZ)
-                sessions = parse_sessions_from_events(events, report_date=report_datetime)
-
-                # Получаем активную смену пользователя на эту дату
                 user_shift = None
                 shift_time_range = None
 
@@ -205,6 +202,10 @@ class DailyReportService:
                     user_shift = await get_user_shift_for_date(db, user_id, report_datetime)
                     if user_shift:
                         shift_time_range = get_shift_time_range(user_shift, report_datetime)
+
+                # Парсим сессии (передаем дату отчета и конец смены для правильной обработки незакрытых сессий в ночных сменах)
+                shift_end_for_parsing = shift_time_range[1] if shift_time_range else None
+                sessions = parse_sessions_from_events(events, report_date=report_datetime, shift_end=shift_end_for_parsing)
 
                 # Рассчитываем часы в смене и вне смены (передаем user_id для логирования)
                 if shift_time_range:

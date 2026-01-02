@@ -1,119 +1,78 @@
+#!/usr/bin/env python3
 """
-Скрипт для выполнения миграции базы данных - добавление новых полей в attendance_events.
+Скрипт для выполнения Alembic миграций базы данных.
+
+Использование:
+    python run_migration.py          # Применить все ожидающие миграции
+    python run_migration.py --check  # Проверить статус миграций
+    python run_migration.py --init   # Инициализировать базу данных (для новых установок)
 """
 
+import argparse
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-from app.database import engine
-from sqlalchemy import text
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Путь к директории backend
+backend_dir = Path(__file__).parent
+alembic_dir = backend_dir / "alembic"
 
 
-async def run_migration():
-    """Выполнение миграции для добавления новых полей в attendance_events."""
-    
-    migration_sql = """
-    -- Добавление новых полей в таблицу attendance_events
-    
-    -- Делаем user_id nullable
-    ALTER TABLE attendance_events 
-        ALTER COLUMN user_id DROP NOT NULL;
-    
-    -- Добавляем новые поля
-    ALTER TABLE attendance_events 
-        ADD COLUMN IF NOT EXISTS employee_no VARCHAR,
-        ADD COLUMN IF NOT EXISTS name VARCHAR,
-        ADD COLUMN IF NOT EXISTS card_no VARCHAR,
-        ADD COLUMN IF NOT EXISTS card_reader_id VARCHAR,
-        ADD COLUMN IF NOT EXISTS event_type_code VARCHAR,
-        ADD COLUMN IF NOT EXISTS event_type_description VARCHAR,
-        ADD COLUMN IF NOT EXISTS remote_host_ip VARCHAR;
-    
-    -- Создание индекса для employee_no
-    CREATE INDEX IF NOT EXISTS ix_attendance_events_employee_no ON attendance_events(employee_no);
-    """
-    
+def run_alembic_command(command_args):
+    """Выполнение команды Alembic."""
+    cmd = [sys.executable, "-m", "alembic"] + command_args
     try:
-        logger.info("Подключение к базе данных...")
-        async with engine.begin() as conn:
-            logger.info("Выполнение миграции...")
-            
-            # Выполняем SQL команды по отдельности для лучшей обработки ошибок
-            commands = [
-                "ALTER TABLE attendance_events ALTER COLUMN user_id DROP NOT NULL",
-                """ALTER TABLE attendance_events 
-                   ADD COLUMN IF NOT EXISTS employee_no VARCHAR,
-                   ADD COLUMN IF NOT EXISTS name VARCHAR,
-                   ADD COLUMN IF NOT EXISTS card_no VARCHAR,
-                   ADD COLUMN IF NOT EXISTS card_reader_id VARCHAR,
-                   ADD COLUMN IF NOT EXISTS event_type_code VARCHAR,
-                   ADD COLUMN IF NOT EXISTS event_type_description VARCHAR,
-                   ADD COLUMN IF NOT EXISTS remote_host_ip VARCHAR""",
-                "CREATE INDEX IF NOT EXISTS ix_attendance_events_employee_no ON attendance_events(employee_no)"
-            ]
-            
-            for i, command in enumerate(commands, 1):
-                try:
-                    logger.info(f"Выполнение команды {i}/{len(commands)}...")
-                    await conn.execute(text(command))
-                    logger.info(f"✓ Команда {i} выполнена успешно")
-                except Exception as e:
-                    # Если колонка уже существует или индекс уже есть - это нормально
-                    if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-                        logger.warning(f"⚠ Команда {i}: {e}")
-                    else:
-                        logger.error(f"✗ Ошибка в команде {i}: {e}")
-                        raise
-            
-            logger.info("✓ Миграция выполнена успешно!")
-            
-            # Проверяем, что поля добавлены
-            logger.info("\nПроверка структуры таблицы...")
-            result = await conn.execute(text("""
-                SELECT column_name, data_type, is_nullable 
-                FROM information_schema.columns 
-                WHERE table_name = 'attendance_events'
-                ORDER BY ordinal_position
-            """))
-            
-            columns = result.fetchall()
-            logger.info(f"Найдено колонок: {len(columns)}")
-            
-            new_fields = ['employee_no', 'name', 'card_no', 'card_reader_id', 
-                         'event_type_code', 'event_type_description', 'remote_host_ip']
-            existing_fields = [col[0] for col in columns]
-            
-            logger.info("\nНовые поля:")
-            for field in new_fields:
-                if field in existing_fields:
-                    logger.info(f"  ✓ {field}")
-                else:
-                    logger.warning(f"  ✗ {field} - не найдено!")
-            
-    except Exception as e:
-        logger.error(f"Ошибка при выполнении миграции: {e}", exc_info=True)
+        result = subprocess.run(cmd, cwd=backend_dir, check=True, capture_output=True, text=True)
+        print(result.stdout)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Ошибка выполнения команды: {e}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
         return False
-    
-    return True
+
+
+def check_migration_status():
+    """Проверка статуса миграций."""
+    print("Проверка статуса миграций...")
+    return run_alembic_command(["current"])
+
+
+def run_migrations():
+    """Применение всех ожидающих миграций."""
+    print("Применение миграций...")
+    return run_alembic_command(["upgrade", "head"])
+
+
+def init_database():
+    """Инициализация базы данных для новых установок."""
+    print("Инициализация базы данных...")
+    success = run_alembic_command(["upgrade", "head"])
+    if success:
+        print("✅ База данных инициализирована успешно!")
+    return success
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Управление миграциями базы данных")
+    parser.add_argument("--check", action="store_true",
+                       help="Проверить статус миграций без применения")
+    parser.add_argument("--init", action="store_true",
+                       help="Инициализировать базу данных (для новых установок)")
+
+    args = parser.parse_args()
+
+    if args.check:
+        success = check_migration_status()
+    elif args.init:
+        success = init_database()
+    else:
+        success = run_migrations()
+
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
-    success = asyncio.run(run_migration())
-    if success:
-        print("\n" + "="*80)
-        print("✅ Миграция выполнена успешно!")
-        print("="*80)
-        sys.exit(0)
-    else:
-        print("\n" + "="*80)
-        print("❌ Ошибка при выполнении миграции")
-        print("="*80)
-        sys.exit(1)
+    main()
 

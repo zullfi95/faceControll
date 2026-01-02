@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     http_port: int = 8000  # Backend работает на порту 8000
     server_ip: str = "46.62.223.55"
 
+    # Hikvision Terminal
+    terminal_in_ip: str = "10.0.0.100"  # IP адрес терминала в VPN сети
+
     # Telegram Bot
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None

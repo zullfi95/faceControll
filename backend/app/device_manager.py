@@ -227,12 +227,37 @@ class DeviceManager:
         
         if client:
             try:
-                connected, error = await client.check_connection()
-                connection_status = "connected" if connected else "error"
-                error_message = error if not connected else None
+                # Используем короткий таймаут для проверки подключения, чтобы не блокировать API
+                import asyncio
+                try:
+                    # Пытаемся проверить подключение с таймаутом 2 секунды
+                    connected, error = await asyncio.wait_for(
+                        client.check_connection(),
+                        timeout=2.0
+                    )
+                    connection_status = "connected" if connected else "error"
+                    # Для webhook режима не показываем ошибку как критическую
+                    if not connected and error and ("таймаут" in error.lower() or "не отвечает" in error.lower()):
+                        error_message = "Устройство недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
+                    else:
+                        error_message = error if not connected else None
+                except asyncio.TimeoutError:
+                    connection_status = "error"
+                    error_message = "Устройство недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
+                except Exception as e:
+                    connection_status = "error"
+                    error_str = str(e)
+                    if "таймаут" in error_str.lower() or "timeout" in error_str.lower():
+                        error_message = "Устройство недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
+                    else:
+                        error_message = error_str
             except Exception as e:
                 connection_status = "error"
                 error_message = str(e)
+        else:
+            # Если клиента нет, устройство считается недоступным
+            connection_status = "error"
+            error_message = "Устройство недоступно для прямого подключения. Используется webhook режим - терминал отправляет события автоматически."
         
         return {
             "device_id": device_id,

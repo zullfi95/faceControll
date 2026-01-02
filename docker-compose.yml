@@ -29,8 +29,8 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-facerecog}
       - WEBHOOK_API_KEY=${WEBHOOK_API_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - TERMINAL_IN_IP=${TERMINAL_IN_IP:-10.0.0.100}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - TERMINAL_IN_IP=${TERMINAL_IN_IP:-10.0.0.100}
       - ENVIRONMENT=development
     networks:
       - app-network

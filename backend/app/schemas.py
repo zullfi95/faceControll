@@ -12,6 +12,8 @@ class UserBase(BaseModel):
     role: Optional[str] = UserRole.CLEANER.value  # Роль пользователя (по умолчанию Cleaner)
 
 class UserCreate(UserBase):
+    photo_path: Optional[str] = None  # Путь к фото (если было захвачено с терминала)
+    
     @field_validator('hikvision_id')
     @classmethod
     def validate_hikvision_id(cls, v):

@@ -20,7 +20,8 @@ async def create_user(db: AsyncSession, user: schemas.UserCreate):
         hikvision_id=user.hikvision_id,
         full_name=user.full_name,
         department=user.department,
-        role=user.role or UserRole.CLEANER.value
+        role=user.role or UserRole.CLEANER.value,
+        photo_path=user.photo_path  # Сохраняем путь к фото, если был передан
     )
     db.add(db_user)
     await db.commit()

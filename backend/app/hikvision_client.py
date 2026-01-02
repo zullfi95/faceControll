@@ -62,14 +62,18 @@ class HikvisionClient:
                 return False, f"Устройство вернуло код ошибки HTTP {response.status_code}"
                 
         except httpx.ConnectTimeout:
-            error_msg = f"Таймаут подключения. Устройство {self.base_url} не отвечает. Проверьте:\n- Правильность IP-адреса\n- Доступность устройства в сети\n- Настройки файрвола"
+            error_msg = f"Устройство {self.base_url} недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
             return False, error_msg
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             error_str = str(e)
             if "SSL" in error_str or "certificate" in error_str.lower():
                 error_msg = f"Ошибка SSL-сертификата: {error_str}. Используется самоподписанный сертификат устройства."
                 return False, error_msg
-            error_msg = f"Не удалось подключиться к {self.base_url}. Возможные причины:\n- Устройство выключено или недоступно в сети\n- Неверный IP-адрес\n- Проблемы с сетевым подключением\n- Блокировка файрволом\n\nДетали: {error_str}"
+            # Для таймаутов и ошибок подключения показываем понятное сообщение для webhook режима
+            if "timeout" in error_str.lower() or "connection" in error_str.lower() or "failed" in error_str.lower():
+                error_msg = f"Устройство {self.base_url} недоступно для входящих соединений. Это нормально при использовании webhook - терминал отправляет события на сервер автоматически."
+            else:
+                error_msg = f"Не удалось подключиться к {self.base_url}. Возможные причины:\n- Устройство выключено или недоступно в сети\n- Неверный IP-адрес\n- Проблемы с сетевым подключением\n- Блокировка файрволом\n\nДетали: {error_str}"
             return False, error_msg
         except httpx.HTTPStatusError as e:
             error_msg = f"HTTP ошибка {e.response.status_code}: {e.response.text[:200]}"
@@ -252,6 +256,104 @@ class HikvisionClient:
                 "message": f"Error creating user: {str(e)}"
             }
 
+    async def upload_face_image_to_terminal(
+        self,
+        employee_no: str,
+        image_bytes: bytes
+    ) -> Dict[str, Any]:
+        """
+        Загрузка фото лица на терминал через ISAPI FaceDataRecord.
+        
+        Args:
+            employee_no: ID сотрудника
+            image_bytes: Байты изображения
+        
+        Returns:
+            Dict с результатом загрузки
+        """
+        try:
+            connected, error_msg = await self.check_connection()
+            if not connected:
+                return {
+                    "success": False,
+                    "error": f"Terminal is not accessible. {error_msg or 'Check network connection.'}"
+                }
+            
+            http_client = await self._get_client()
+            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+            
+            # Формируем multipart/form-data с изображением
+            face_data = {
+                "faceLibType": "blackFD",
+                "FDID": "1",
+                "FPID": employee_no
+            }
+            face_data_str = json.dumps(face_data, separators=(',', ':'))
+            
+            # Создаем multipart body с JSON данными и изображением
+            body_parts = [
+                f'--{boundary}\r\n',
+                f'Content-Disposition: form-data; name="FaceDataRecord"\r\n',
+                f'Content-Type: application/json\r\n',
+                f'\r\n',
+                f'{face_data_str}\r\n',
+                f'--{boundary}\r\n',
+                f'Content-Disposition: form-data; name="faceImage"; filename="face.jpg"\r\n',
+                f'Content-Type: image/jpeg\r\n',
+                f'\r\n'
+            ]
+            
+            # Объединяем заголовки и изображение
+            body_start = ''.join(body_parts).encode('utf-8')
+            body_end = f'\r\n--{boundary}--\r\n'.encode('utf-8')
+            body = body_start + image_bytes + body_end
+            
+            url = f"{self.base_url}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+            if self._token:
+                url += f"&token={self._token}"
+            
+            response = await http_client.post(
+                url,
+                content=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body))
+                },
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                try:
+                    response_data = response.json()
+                    if response_data.get("statusCode") == 1:
+                        return {
+                            "success": True,
+                            "message": f"Face image uploaded successfully for user {employee_no}"
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"Upload failed: {response_data}",
+                            "message": f"Face image upload failed for user {employee_no}"
+                        }
+                except:
+                    return {
+                        "success": True,
+                        "message": f"Face image uploaded successfully for user {employee_no}"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status_code}: {response.text[:500]}",
+                    "message": f"Face image upload failed for user {employee_no}: HTTP {response.status_code}"
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Error uploading face image: {str(e)}"
+            }
+    
     async def setup_user_face_fdlib(
         self,
         employee_no: str,

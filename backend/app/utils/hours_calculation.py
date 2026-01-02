@@ -237,8 +237,24 @@ def split_session_by_shift(session_start: datetime, session_end: datetime,
         session_duration = session_end - session_start
         total_hours = session_duration.total_seconds() / 3600
 
-        # Остальное время - вне смены
-        hours_outside_shift = total_hours - hours_in_shift
+        # Время вне смены = общее время - время в смене
+        # Но нужно правильно рассчитать время ДО начала смены и ПОСЛЕ конца смены
+        hours_before_shift = 0.0
+        hours_after_shift = 0.0
+        
+        # Время до начала смены (если сессия началась раньше смены)
+        if session_start < shift_start:
+            before_duration = min(session_end, shift_start) - session_start
+            if before_duration.total_seconds() > 0:
+                hours_before_shift = before_duration.total_seconds() / 3600
+        
+        # Время после конца смены (если сессия закончилась позже смены)
+        if session_end > shift_end:
+            after_duration = session_end - max(session_start, shift_end)
+            if after_duration.total_seconds() > 0:
+                hours_after_shift = after_duration.total_seconds() / 3600
+        
+        hours_outside_shift = hours_before_shift + hours_after_shift
 
         return (hours_in_shift, hours_outside_shift)
 
@@ -289,22 +305,24 @@ def split_session_across_midnight(session_start: datetime, session_end: datetime
             shift_end = shift_end.astimezone(base_tz)
 
         # Определяем полночь между началом и концом смены (с правильным часовым поясом)
-        # Используем date() от нормализованного shift_start
+        # Для ночной смены полночь - это 00:00:00 следующего дня после начала смены
         shift_date = shift_start.date()
-        midnight = datetime.combine(shift_date, time(23, 59, 59), tzinfo=base_tz)
+        midnight = datetime.combine(shift_date + timedelta(days=1), time(0, 0, 0), tzinfo=base_tz)
 
-        if shift_start <= midnight < shift_end:
+        # Проверяем, переходит ли смена через полночь
+        # Смена переходит через полночь, если shift_end находится на следующий день после shift_start
+        if shift_end.date() > shift_start.date():
             # Смена переходит через полночь
             # Разделяем на две части: до полуночи и после полуночи
 
-            # Часть до полуночи
-            shift_end_part1 = min(shift_end, midnight + timedelta(seconds=1))
+            # Часть до полуночи (от shift_start до midnight)
+            shift_end_part1 = midnight
             hours_part1_in, hours_part1_out = split_session_by_shift(
                 session_start, session_end, shift_start, shift_end_part1
             )
 
-            # Часть после полуночи
-            shift_start_part2 = max(shift_start, midnight + timedelta(seconds=1))
+            # Часть после полуночи (от midnight до shift_end)
+            shift_start_part2 = midnight
             hours_part2_in, hours_part2_out = split_session_by_shift(
                 session_start, session_end, shift_start_part2, shift_end
             )
@@ -413,7 +431,7 @@ def calculate_hours_for_sessions(sessions: List[Tuple[datetime, datetime]],
         return (0.0, 0.0)
 
 
-def parse_sessions_from_events(events: List[models.AttendanceEvent], report_date: Optional[datetime] = None) -> List[Tuple[datetime, datetime]]:
+def parse_sessions_from_events(events: List[models.AttendanceEvent], report_date: Optional[datetime] = None, shift_end: Optional[datetime] = None) -> List[Tuple[datetime, datetime]]:
     """
     Преобразование списка событий в сессии работы (пары вход-выход).
 
@@ -538,15 +556,24 @@ def parse_sessions_from_events(events: List[models.AttendanceEvent], report_date
                     f"User_id={user_id}, Entry={current_entry}, Using current time={now}"
                 )
             elif current_entry_date == report_date_only:
-                # Незакрытая сессия в день отчета (но не сегодня) - закрываем концом дня
-                end_of_day = datetime.combine(current_entry_date, time.max, tzinfo=BAKU_TZ).replace(
-                    hour=23, minute=59, second=59
-                )
-                sessions.append((current_entry, end_of_day))
-                logger.info(
-                    f"parse_sessions_from_events: Unclosed session for report date. "
-                    f"User_id={user_id}, Entry={current_entry}, Closing at end of day={end_of_day}"
-                )
+                # Незакрытая сессия в день отчета (но не сегодня) - закрываем концом дня или концом смены
+                if shift_end and shift_end.date() > current_entry_date:
+                    # Если смена заканчивается на следующий день (ночная смена), используем конец смены
+                    sessions.append((current_entry, shift_end))
+                    logger.info(
+                        f"parse_sessions_from_events: Unclosed session for report date (night shift). "
+                        f"User_id={user_id}, Entry={current_entry}, Closing at shift end={shift_end}"
+                    )
+                else:
+                    # Обычная смена - закрываем концом дня
+                    end_of_day = datetime.combine(current_entry_date, time.max, tzinfo=BAKU_TZ).replace(
+                        hour=23, minute=59, second=59
+                    )
+                    sessions.append((current_entry, end_of_day))
+                    logger.info(
+                        f"parse_sessions_from_events: Unclosed session for report date. "
+                        f"User_id={user_id}, Entry={current_entry}, Closing at end of day={end_of_day}"
+                    )
             else:
                 # Незакрытая сессия в прошлом (не в день отчета) - не учитываем
                 logger.warning(
